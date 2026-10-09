@@ -1,0 +1,28 @@
+# Secrets and local config — never commit
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+*.pem
+*.key
+*.p8
+*.jks
+*.keystore
+google-services.json
+GoogleService-Info.plist
+.neon
+
+# Personal data
+Receipts/
+receipts-test/
+**/uploads/
+*.db
+*.sqlite
+
+# Local tool settings and generated output
+.claude/settings.local.json
+mobile/.claude/
+.DS_Store
+.vscode/

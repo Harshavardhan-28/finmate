@@ -1,0 +1,22 @@
+# Dev-only Postgres. `docker compose up -d db` from the repo root.
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: finmate-db
+    environment:
+      POSTGRES_USER: finmate
+      POSTGRES_PASSWORD: finmate
+      POSTGRES_DB: finmate
+    ports:
+      - "5432:5432"
+    volumes:
+      - finmate-pgdata:/var/lib/postgresql/data
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finmate -d finmate"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  finmate-pgdata:
