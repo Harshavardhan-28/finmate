@@ -37,6 +37,17 @@ CREATE TABLE IF NOT EXISTS expenses (
   note TEXT NOT NULL DEFAULT '', receipt_path TEXT,
   created_at TEXT NOT NULL DEFAULT {_NOW});
 ALTER TABLE expenses ADD COLUMN IF NOT EXISTS bill_id INTEGER REFERENCES bills(id) ON DELETE CASCADE;
+-- A bill is one purchase; each line item is an expense row linked to it (so budgets and trends need no changes).
+ALTER TABLE bills ADD COLUMN IF NOT EXISTS total DOUBLE PRECISION;
+ALTER TABLE bills ADD COLUMN IF NOT EXISTS tax_fees DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE bills ADD COLUMN IF NOT EXISTS discount DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE bills ADD COLUMN IF NOT EXISTS bill_number TEXT NOT NULL DEFAULT '';
+ALTER TABLE bills ADD COLUMN IF NOT EXISTS payment_method TEXT NOT NULL DEFAULT '';
+ALTER TABLE bills ADD COLUMN IF NOT EXISTS attachment_id TEXT;
+ALTER TABLE expenses ADD COLUMN IF NOT EXISTS quantity DOUBLE PRECISION;
+ALTER TABLE expenses ADD COLUMN IF NOT EXISTS unit_price DOUBLE PRECISION;
+CREATE INDEX IF NOT EXISTS expenses_bill_idx ON expenses (bill_id);
+UPDATE bills b SET total = COALESCE((SELECT SUM(amount) FROM expenses e WHERE e.bill_id = b.id), 0) WHERE b.total IS NULL;
 CREATE TABLE IF NOT EXISTS budgets (
   owner_type TEXT NOT NULL CHECK (owner_type IN ('user','family')),
   owner_id TEXT NOT NULL, category TEXT NOT NULL, monthly_limit DOUBLE PRECISION NOT NULL,
@@ -48,6 +59,12 @@ CREATE TABLE IF NOT EXISTS alerts (
   created_at TEXT NOT NULL DEFAULT {_NOW});
 CREATE TABLE IF NOT EXISTS attachments (
   id TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT {_NOW});
+-- Server-side holding area for a bill between "the model read it" and "the user confirmed it". The model only ever
+-- passes the id around, so it cannot alter or drop line items, and a draft is only readable by the user it belongs to.
+CREATE TABLE IF NOT EXISTS bill_drafts (
+  id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('proposed','confirmed')), payload TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT {_NOW});
 CREATE TABLE IF NOT EXISTS advice (
   id SERIAL PRIMARY KEY, user_id TEXT NOT NULL,
   text TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT {_NOW});

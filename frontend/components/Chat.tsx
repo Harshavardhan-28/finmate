@@ -1,10 +1,13 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { CATEGORIES, type Proposal } from "@/lib/types";
+import Pick from "@/components/Pick";
+import { money } from "@/lib/format";
+import { CATEGORIES, type BillProposal, type Proposal } from "@/lib/types";
 
 export type Msg =
   | { id: number; role: "user" | "assistant" | "error"; text: string; image?: string }
-  | { id: number; role: "proposal"; proposal: Proposal; state: "pending" | "done" | "discarded" };
+  | { id: number; role: "proposal"; proposal: Proposal; state: "pending" | "done" | "discarded" }
+  | { id: number; role: "bill"; bill: BillProposal; state: "pending" | "done" | "discarded" };
 
 const PROMPTS = ["How are my budgets?", "Where can I save money?", "Show my family's spending"];
 
@@ -86,12 +89,84 @@ export function ConfirmCard({
   );
 }
 
+type Line = { name: string; category: string; amount: string; quantity: number | null; unit_price: number | null };
+
+/** Review a scanned bill: every line item with its own category, saved together as one bill. */
+export function BillCard({
+  msg, onConfirm, onDiscard, disabled,
+}: {
+  msg: Extract<Msg, { role: "bill" }>;
+  onConfirm: (b: BillProposal) => void;
+  onDiscard: () => void;
+  disabled: boolean;
+}) {
+  const [b, setB] = useState<BillProposal>(msg.bill);
+  const [rows, setRows] = useState<Line[]>(() => msg.bill.items.map((i) => ({ ...i, amount: String(i.amount) })));
+  const locked = msg.state !== "pending";
+  const total = Math.round(rows.reduce((s, r) => s + (Number(r.amount) > 0 ? Number(r.amount) : 0), 0) * 100) / 100;
+  const patch = (n: number, p: Partial<Line>) => setRows((rs) => rs.map((r, i) => (i === n ? { ...r, ...p } : r)));
+  const unclear = (f: string) => (b.unclear_fields.includes(f) ? "unclear" : "");
+  const valid = b.merchant.trim() !== "" && /^\d{4}-\d{2}-\d{2}$/.test(b.date) && rows.length > 0
+    && rows.every((r) => r.name.trim() && Number(r.amount) > 0);
+  const mismatch = Math.abs(b.total - total) > 1;
+  const submit = () => onConfirm({ ...b, total, items: rows.map((r) => ({ name: r.name.trim(), quantity: r.quantity, unit_price: r.unit_price, amount: Number(r.amount), category: r.category })) });
+  return (
+    <div className="confirm" style={locked ? { opacity: 0.6 } : undefined}>
+      <h3>
+        Review this bill
+        {msg.state === "done" && <span className="chip">Saved</span>}
+        {msg.state === "discarded" && <span className="chip warn">Discarded</span>}
+      </h3>
+      <div className="sub">
+        {rows.length} {rows.length === 1 ? "item" : "items"} read from your bill{b.bill_number ? ` (no. ${b.bill_number})` : ""}. Fix anything that is off before saving.
+      </div>
+      <div className="fields">
+        <label className={`field ${unclear("merchant")}`}>Merchant
+          <input type="text" disabled={locked} value={b.merchant} onChange={(e) => setB({ ...b, merchant: e.target.value })} />
+        </label>
+        <label className={`field ${unclear("date")}`}>Date
+          <input type="date" disabled={locked} value={b.date} onChange={(e) => setB({ ...b, date: e.target.value })} />
+        </label>
+      </div>
+      <div className="bill-grid" role="group" aria-label="Bill items" style={{ marginTop: 12 }}>
+        <div className="bill-row head" aria-hidden><span>Item</span><span>Category</span><span className="r">Amount</span><span /></div>
+        {rows.map((r, i) => (
+          <div className="bill-row" key={i}>
+            <input className="b-name" aria-label={`Item ${i + 1} name`} disabled={locked} value={r.name} onChange={(e) => patch(i, { name: e.target.value })} />
+            <Pick className="b-cat" label={`Item ${i + 1} category`} value={r.category} onChange={(category) => patch(i, { category })}
+              options={CATEGORIES.map((c) => ({ value: c, label: c }))} />
+            <input aria-label={`Item ${i + 1} amount`} className="b-amt r" type="number" min="0.01" step="0.01" disabled={locked}
+              value={r.amount} onChange={(e) => patch(i, { amount: e.target.value })} />
+            <button type="button" className="rowx" aria-label={`Remove item ${i + 1}`} disabled={locked || rows.length === 1}
+              onClick={() => setRows((rs) => rs.filter((_, n) => n !== i))}>×</button>
+          </div>
+        ))}
+      </div>
+      <div className="billform-foot">
+        {!locked && <button type="button" className="btn sm" onClick={() => setRows((rs) => [...rs, { name: "", category: "Other", amount: "", quantity: null, unit_price: null }])}>+ Add item</button>}
+        <span className="bill-total">Total <b>{money(total)}</b></span>
+      </div>
+      {mismatch && !locked && <p className="muted" style={{ marginTop: 8 }}>The bill says {money(b.total)}, but these items add up to {money(total)}. Check the amounts.</p>}
+      {(b.tax_fees > 0 || b.discount > 0) && <p className="muted" style={{ marginTop: 8 }}>
+        {b.tax_fees > 0 ? `Includes ${money(b.tax_fees)} taxes, fees and rounding. ` : ""}{b.discount > 0 ? `Item prices were adjusted for a ${money(b.discount)} discount.` : ""}
+      </p>}
+      {!locked && (
+        <div className="confirm-actions">
+          <button className="btn primary" disabled={disabled || !valid} onClick={submit}>Save bill · {money(total)}</button>
+          <button className="btn" disabled={disabled} onClick={onDiscard}>Discard</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Chat(props: {
   messages: Msg[];
   busy: boolean;
   userName: string;
   onSend: (text: string) => void;
   onConfirm: (id: number, p: Proposal) => void;
+  onConfirmBill: (id: number, b: BillProposal) => void;
   onDiscard: (id: number) => void;
 }) {
   const { messages, busy } = props;
@@ -123,6 +198,9 @@ export default function Chat(props: {
           m.role === "proposal" ? (
             <ConfirmCard key={m.id} msg={m} disabled={busy}
               onConfirm={(p) => props.onConfirm(m.id, p)} onDiscard={() => props.onDiscard(m.id)} />
+          ) : m.role === "bill" ? (
+            <BillCard key={m.id} msg={m} disabled={busy}
+              onConfirm={(b) => props.onConfirmBill(m.id, b)} onDiscard={() => props.onDiscard(m.id)} />
           ) : (
             <div key={m.id} className={`msg ${m.role}`}>
               {/* eslint-disable-next-line @next/next/no-img-element */}

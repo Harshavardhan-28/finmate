@@ -104,3 +104,43 @@ def test_export_includes_bill_id_and_account_deletion_removes_bills(client):
     with db.connect() as c:
         assert c.execute("SELECT COUNT(*) FROM bills b JOIN users u ON u.id=b.user_id WHERE u.email='solo2@example.com'").fetchone()[0] == 0
         assert c.execute("SELECT COUNT(*) FROM bills").fetchone()[0] == 1   # Priya's own bill remains
+
+
+def test_bill_keeps_quantity_total_and_receipt_link():
+    from finmate import vision
+    vision.register_attachment("att1", "u_priya")
+    r = services.save_bill("u_priya", "DMart", "2026-10-08", [
+        {"name": "Milk 1lt", "amount": 112, "category": "Groceries", "quantity": 2, "unit_price": 56},
+        {"name": "Kaju katli", "amount": 179, "category": "Food"},
+    ], source="receipt", bill_number="B-1", payment_method="Card", tax_fees=3.5, attachment_id="att1")
+    bill = services.get_bill("u_priya", r["bill"]["id"])
+    assert bill["total"] == 291 and bill["bill_number"] == "B-1" and bill["payment_method"] == "Card"
+    assert bill["tax_fees"] == 3.5 and bill["attachment_id"] == "att1" and len(bill["items"]) == 2
+    milk = next(i for i in bill["items"] if i["note"] == "Milk 1lt")
+    assert milk["quantity"] == 2 and milk["unit_price"] == 56
+    assert [b["id"] for b in services.list_bills("u_priya", 5)] == [bill["id"]]
+    assert services.get_bill("u_ravi", bill["id"]) is None          # not someone else's
+
+
+def test_attachment_of_another_user_is_not_linked():
+    from finmate import vision
+    vision.register_attachment("ravi-att", "u_ravi")
+    r = services.save_bill("u_priya", "X", "2026-10-08", [{"name": "a", "amount": 5, "category": "Food"}], attachment_id="ravi-att")
+    assert r["bill"]["attachment_id"] is None
+
+
+def test_deleting_an_item_updates_or_removes_its_bill():
+    r = services.save_bill("u_priya", "Shop", "2026-10-08", [
+        {"name": "a", "amount": 100, "category": "Food"}, {"name": "b", "amount": 50, "category": "Food"}])
+    bill_id, ids = r["bill"]["id"], [i["id"] for i in r["bill"]["items"]]
+    assert services.delete_expense("u_priya", ids[0])
+    assert services.get_bill("u_priya", bill_id)["total"] == 50
+    assert services.delete_expense("u_priya", ids[1])
+    assert services.get_bill("u_priya", bill_id) is None
+
+
+def test_drafts_are_private_to_their_owner():
+    services.put_draft("u_ravi", "d1", "proposed", {"merchant": "X"})
+    assert services.get_draft("u_ravi", "d1", "proposed") == {"merchant": "X"}
+    assert services.get_draft("u_priya", "d1", "proposed") is None
+    assert services.get_draft("u_ravi", "d1", "confirmed") is None

@@ -12,7 +12,7 @@ export default function AssistantPage() {
         <section aria-label="Chat">
           <Chat messages={chat.messages} busy={chat.busy} userName={user.name}
             onSend={chat.send}
-            onConfirm={chat.confirm} onDiscard={chat.discard} />
+            onConfirm={chat.confirm} onConfirmBill={chat.confirmBill} onDiscard={chat.discard} />
         </section>
         <section aria-label="Agent activity" className="tape-col">
           <AgentTape trace={chat.trace} busy={chat.busy} />

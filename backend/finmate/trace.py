@@ -40,7 +40,7 @@ class TracePlugin(BasePlugin):
 
     async def after_tool_callback(self, *, tool, tool_args, tool_context, result):
         emit("tool_result", agent=tool_context.agent_name, tool=tool.name, result=_short(result),
-             raw=result if tool.name in ("propose_expense", "save_expense") else None)
+             raw=result if tool.name in ("propose_expense", "save_expense", "propose_bill", "save_bill") else None)
 
     async def on_tool_error_callback(self, *, tool, tool_args, tool_context, error):
         emit("tool_error", agent=tool_context.agent_name, tool=tool.name, error=str(error))

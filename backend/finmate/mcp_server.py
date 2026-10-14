@@ -16,7 +16,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import ValidationError
 
 from . import db, identity, services, vision
-from .schemas import ExpenseProposal
+from .schemas import BillProposal, ExpenseProposal
 
 log = logging.getLogger("finmate.tools")
 mcp = MCPServer("finmate-tools")
@@ -29,9 +29,51 @@ def _me() -> str:
 # ---- Receipt Agent tools -------------------------------------------------------------
 @mcp.tool()
 def ocr_receipt(attachment_id: str) -> dict:
-    """OCR + field extraction for a receipt image the signed-in user uploaded. Returns PROPOSED fields
-    (amount, date, merchant, category, note, unclear_fields). Does not save anything."""
-    return vision.extract(attachment_id, "receipt image", _me())
+    """Read a bill / receipt photo the signed-in user uploaded: merchant, date, total and EVERY line item with its
+    own category. The full bill is held server-side as a draft; you get a short summary and the draft_id. Pass that
+    draft_id to propose_bill. Does not save anything."""
+    me = _me()
+    out = vision.extract(attachment_id, "receipt image", me)
+    try:
+        bill = BillProposal(**out["bill"], source="receipt", attachment_id=attachment_id)
+    except ValidationError as exc:
+        return {"error": "invalid_bill", "message": "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors())}
+    services.put_draft(me, attachment_id, "proposed", bill.as_json())
+    by_cat: dict[str, float] = {}
+    for i in bill.items:
+        by_cat[i.category] = round(by_cat.get(i.category, 0) + i.amount, 2)
+    return {"draft_id": attachment_id, "merchant": bill.merchant, "date": bill.date.isoformat(), "total": bill.total,
+            "item_count": len(bill.items), "by_category": by_cat, "unclear_fields": bill.unclear_fields}
+
+
+@mcp.tool()
+def propose_bill(draft_id: str, unclear_fields: list[str] | None = None) -> dict:
+    """Hand a bill read by ocr_receipt to the user for review and confirmation (human in the loop). ALWAYS call this
+    as the last step of capturing a photographed bill. It does not save. Pass only the draft_id from ocr_receipt;
+    list in unclear_fields anything you are unsure about."""
+    me = _me()
+    draft = services.get_draft(me, draft_id, "proposed")
+    if draft is None:
+        return {"error": "unknown_draft", "message": "No such bill draft. Run ocr_receipt on the receipt first."}
+    if unclear_fields:
+        draft["unclear_fields"] = sorted(set(draft.get("unclear_fields", [])) | {u for u in unclear_fields if u in ("merchant", "date", "total", "items")})
+    return {"bill_proposal": {**draft, "draft_id": draft_id}, "status": "awaiting_user_confirmation"}
+
+
+@mcp.tool()
+def save_bill(confirmation_id: str) -> dict:
+    """Save a bill the user CONFIRMED (the request gives a confirmation_id). Every line item is saved as its own
+    expense in its own category, all linked to one bill. Returns the saved bill with its items plus any budget alerts."""
+    me = _me()
+    bill = services.get_draft(me, confirmation_id, "confirmed")
+    if bill is None:
+        return {"error": "unknown_confirmation", "message": "No confirmed bill with that id. Do not retry; tell the user."}
+    saved = services.save_bill(me, bill["merchant"], bill["date"], bill["items"], bill.get("note", ""), bill.get("source", "receipt"),
+                               bill_number=bill.get("bill_number", ""), payment_method=bill.get("payment_method", ""),
+                               tax_fees=bill.get("tax_fees", 0), discount=bill.get("discount", 0),
+                               attachment_id=bill.get("attachment_id"))
+    services.drop_draft(me, confirmation_id)
+    return saved
 
 
 @mcp.tool()

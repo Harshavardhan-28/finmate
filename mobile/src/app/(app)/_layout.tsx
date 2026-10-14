@@ -31,6 +31,7 @@ export default function AppLayout() {
             <Stack.Screen name="(tabs)" />
             <Stack.Screen name="add" options={{ presentation: "modal" }} />
             <Stack.Screen name="confirm" options={{ presentation: "transparentModal", animation: "slide_from_bottom" }} />
+            <Stack.Screen name="bill" options={{ presentation: "transparentModal", animation: "slide_from_bottom" }} />
             <Stack.Screen name="assistant" />
             <Stack.Screen name="alerts" />
             <Stack.Screen name="settings" />

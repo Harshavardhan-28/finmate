@@ -46,10 +46,20 @@ function Scan() {
   const [perm, ask] = useCameraPermissions();
   const cam = useRef<CameraView>(null);
   const [flash, setFlash] = useState(false);
+  const [ready, setReady] = useState(false);
+  const [shooting, setShooting] = useState(false);
 
   async function shoot() {
-    const pic = await cam.current?.takePictureAsync({ quality: 0.7 });
-    if (pic) void capture(pic.uri, "receipt.jpg", "image/jpeg", "receipt");
+    if (!ready || shooting) return;
+    setShooting(true);
+    try {
+      // skipProcessing avoids a slow/failed post-capture step on some Samsung devices; the server fixes rotation from EXIF.
+      const pic = await cam.current?.takePictureAsync({ quality: 0.7, skipProcessing: true });
+      if (!pic?.uri) throw new Error("The camera returned no photo.");
+      void capture(pic.uri, "receipt.jpg", "image/jpeg", "receipt");
+    } catch (e) {
+      Alert.alert("Couldn’t take the photo", e instanceof Error ? e.message : "Try again, or choose it from your photos.");
+    } finally { setShooting(false); }
   }
   async function pick() {
     const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.7 });
@@ -67,11 +77,11 @@ function Scan() {
   }
   return (
     <View style={{ flex: 1 }}>
-      <CameraView ref={cam} style={{ flex: 1 }} facing="back" enableTorch={flash} />
+      <CameraView ref={cam} style={{ flex: 1 }} facing="back" enableTorch={flash} onCameraReady={() => setReady(true)} onMountError={(e) => Alert.alert("Camera problem", e.message)} />
       <View pointerEvents="none" style={{ position: "absolute", top: 20, bottom: 150, left: 36, right: 36, borderWidth: 3, borderColor: "#b0e739", borderRadius: 22, opacity: 0.9 }} />
       <View style={{ position: "absolute", left: 0, right: 0, bottom: 0, paddingBottom: bottom + 20, paddingTop: 16, flexDirection: "row", justifyContent: "space-around", alignItems: "center", backgroundColor: "rgba(0,0,0,0.45)" }}>
         <Pressable onPress={pick} accessibilityLabel="Choose from photos" style={{ width: 52, height: 52, borderRadius: 14, borderWidth: 2, borderColor: "#fff", alignItems: "center", justifyContent: "center" }}><Icon name="image" color="#fff" /></Pressable>
-        <Pressable onPress={shoot} accessibilityLabel="Take photo" style={{ width: 78, height: 78, borderRadius: 39, borderWidth: 4, borderColor: "#fff", alignItems: "center", justifyContent: "center" }}><View style={{ width: 60, height: 60, borderRadius: 30, backgroundColor: "#b0e739" }} /></Pressable>
+        <Pressable onPress={shoot} disabled={!ready || shooting} accessibilityLabel="Take photo" style={{ opacity: ready && !shooting ? 1 : 0.5, width: 78, height: 78, borderRadius: 39, borderWidth: 4, borderColor: "#fff", alignItems: "center", justifyContent: "center" }}><View style={{ width: 60, height: 60, borderRadius: 30, backgroundColor: "#b0e739" }} /></Pressable>
         <Pressable onPress={() => setFlash(!flash)} accessibilityLabel="Torch" style={{ width: 52, height: 52, borderRadius: 26, borderWidth: 2, borderColor: flash ? "#b0e739" : "#fff", alignItems: "center", justifyContent: "center" }}><Icon name="flash" color={flash ? "#b0e739" : "#fff"} /></Pressable>
       </View>
     </View>

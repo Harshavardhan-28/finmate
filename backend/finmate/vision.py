@@ -1,7 +1,7 @@
 """OCR and speech-to-text for the Receipt Agent: Gemini multimodal, or local Ollama vision + Whisper (see llm.py).
 
-Both functions read a previously uploaded file by attachment_id and return *proposed* expense
-fields. Nothing is saved here; the user must confirm first.
+Both functions read a previously uploaded file by attachment_id and return *proposed* data: one expense for a
+voice note, a whole bill (header plus every line item) for a photo. Nothing is saved here; the user must confirm first.
 """
 import base64
 import json
@@ -13,7 +13,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from . import db, llm
-from .schemas import ReceiptFields
+from .schemas import BillFields, ReceiptFields
 
 UPLOADS = Path(os.environ.get("FINMATE_UPLOADS", Path(__file__).resolve().parent.parent / "uploads"))
 
@@ -30,6 +30,28 @@ _FIELDS_PROMPT = (
     '- "note": at most 10 words naming the main items or the route\n'
     '- "unclear_fields": list of the keys above you are not sure about, else []\n'
     '- "transcript": the spoken words if this is audio, else ""'
+)
+
+
+_BILL_PROMPT = (
+    "Read this bill / receipt completely and reply with a single JSON object and nothing else, with exactly these keys:\n"
+    '- "merchant": the store or service brand a person would recognise (for example DMart, RajKamal Oils, Central Railway), '
+    "not the legal company name, branch or address\n"
+    '- "date": the date printed on the bill, copied exactly as printed (for example 30/09/2026 or 28/09/2026). '
+    'Indian bills use DD/MM/YYYY. Use "" only if no date is printed anywhere; never guess today\'s date\n'
+    '- "total": number, the FINAL amount actually paid in rupees (grand total / "Amount received" / "Card Payment")\n'
+    '- "bill_number": the bill or invoice number, else ""\n'
+    '- "payment_method": Card, Cash or UPI if shown, else ""\n'
+    '- "items": a list with EVERY purchased line, top to bottom, none skipped and none repeated. Each item is an object '
+    '{{"name": the product name as printed, written out in plain words (for example "Amul Fresh Cream 250ml"), '
+    '"quantity": number or null, "unit_price": the rate (price of one unit) or null, "amount": the value of the whole line, '
+    'which is the right-most number on that line and equals quantity x rate (for 2 pieces at 18.60 the amount is 37.20), '
+    '"category": exactly one of Transport, Food, Groceries, Shopping, Entertainment, Utilities, Health, Other}}\n'
+    '- "unclear_fields": the keys above you are not sure about, else []\n'
+    "Rules: judge each item's category from the item itself. Staples, dairy, oil, spices, fruit, vegetables and household "
+    "goods are Groceries; sweets, snacks, instant noodles, cooked food and drinks are Food; tickets and fuel are Transport. "
+    "Never list totals, tax or GST summary rows, 'Items: / Qty:' count lines, payment lines, savings or MRP lines as items. "
+    "A ticket or a one-line bill has exactly one item."
 )
 
 
@@ -51,8 +73,9 @@ def _fake(kind: str) -> dict:
     if kind == "voice note":
         return {"amount": 450, "date": db.today().isoformat(), "merchant": "Uber", "category": "Transport",
                 "note": "Home to Office", "unclear_fields": [], "transcript": "spent 450 on cab"}
-    return {"amount": 450, "date": db.today().isoformat(), "merchant": "Uber", "category": "Transport",
-            "note": "Home to Office", "unclear_fields": [], "transcript": ""}
+    return {"merchant": "Uber", "date": db.today().isoformat(), "total": 450, "bill_number": "", "payment_method": "UPI",
+            "items": [{"name": "Home to Office", "quantity": 1, "unit_price": 450, "amount": 450, "category": "Transport"}],
+            "unclear_fields": []}
 
 
 def register_attachment(attachment_id: str, user_id: str) -> None:
@@ -80,11 +103,22 @@ def _parse_fields(text: str) -> dict:
     return ReceiptFields.model_validate(raw).as_json()
 
 
-def _validated(ask, repair: bool = True) -> dict:
+def _parse_bill(text: str) -> dict:
+    """Parse a model's raw answer into a validated, reconciled bill (plain dict, JSON-safe)."""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
+    text = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
+    start, end = text.find("{"), text.rfind("}")
+    raw = json.loads(text[start:end + 1] if start != -1 and end != -1 else text)
+    if not isinstance(raw, dict):
+        raise ValueError("model did not return a JSON object")
+    return BillFields.model_validate(raw).as_json()
+
+
+def _validated(ask, repair: bool = True, parse=_parse_fields) -> dict:
     """Run `ask(extra_prompt)` and validate. On a bad answer, retry ONCE telling the model exactly what was wrong.
     An empty answer is not repairable (the model ran out of tokens), so it fails straight away."""
     try:
-        return _parse_fields(ask(""))
+        return parse(ask(""))
     except (ValueError, ValidationError) as first:  # JSONDecodeError is a ValueError
         if isinstance(first, json.JSONDecodeError) and not first.doc.strip():
             raise ValueError("the model returned no answer") from first
@@ -93,9 +127,9 @@ def _validated(ask, repair: bool = True) -> dict:
         if not repair:
             raise ValueError(problem) from first
         try:
-            return _parse_fields(ask(f"\n\nYour previous answer was rejected: {problem}. Reply again with corrected JSON only."))
+            return parse(ask(f"\n\nYour previous answer was rejected: {problem}. Reply again with corrected JSON only."))
         except (ValueError, ValidationError) as second:
-            raise ValueError(f"Could not read a valid expense from this file ({problem}). Enter it manually.") from second
+            raise ValueError(f"Could not read a valid bill from this file ({problem}). Enter it manually.") from second
 
 
 def _gemini_extract(path: Path, kind: str) -> dict:
@@ -106,7 +140,8 @@ def _gemini_extract(path: Path, kind: str) -> dict:
     if mime is None:
         raise ValueError(f"unsupported file type {path.suffix!r}")
     data = path.read_bytes()
-    prompt = _FIELDS_PROMPT.format(kind=kind, today=db.today().isoformat())
+    bill = kind != "voice note"
+    prompt = (_BILL_PROMPT if bill else _FIELDS_PROMPT).format(kind=kind, today=db.today().isoformat())
 
     def ask(extra: str) -> str:
         resp = genai.Client().models.generate_content(
@@ -114,7 +149,7 @@ def _gemini_extract(path: Path, kind: str) -> dict:
             config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0))
         return resp.text
 
-    return _validated(ask)
+    return _validated(ask, parse=_parse_bill if bill else _parse_fields)
 
 
 def _prepare_image(path: Path, rotate: int = 0) -> bytes:
@@ -140,11 +175,11 @@ def _prepare_image(path: Path, rotate: int = 0) -> bytes:
     return out.getvalue()
 
 
-def _ollama_chat(model: str, prompt: str, images: list[str] | None = None) -> str:
+def _ollama_chat(model: str, prompt: str, images: list[str] | None = None, num_predict: int | None = None) -> str:
     """One Ollama chat call. Grammar-constrained `format` is not used: vision models in current Ollama builds fail with
     a 500 on it, so strictness comes from the pydantic validation in _validated() instead."""
     body = {"model": model, "stream": False, "think": False,
-            "options": {"temperature": 0, "num_predict": int(os.environ.get("FINMATE_OLLAMA_NUM_PREDICT", "1400")), **llm.ollama_options()},
+            "options": {"temperature": 0, "num_predict": num_predict or int(os.environ.get("FINMATE_OLLAMA_NUM_PREDICT", "1400")), **llm.ollama_options()},
             "keep_alive": os.environ.get("FINMATE_OLLAMA_KEEP_ALIVE", "30m"),
             "messages": [{"role": "user", "content": prompt, **({"images": images} if images else {})}]}
     req = urllib.request.Request(f"{llm.ollama_base()}/api/chat", data=json.dumps(body).encode(),
@@ -180,22 +215,27 @@ def _ollama_extract(path: Path, kind: str) -> dict:
     if path.suffix.lower() not in _MIME:
         raise ValueError(f"unsupported file type {path.suffix!r}")
     model = llm.ollama_vision_tag()
+    bill_prompt = _BILL_PROMPT.format(today=db.today().isoformat())
+    budget = int(os.environ.get("FINMATE_OLLAMA_BILL_NUM_PREDICT", "3500"))  # a long bill is 30+ lines of JSON
     # Phone photos are often sideways. Read it upright first; only if that yields nothing usable, try the rotations.
     last = "no attempt made"
     for rotate in (0, 90, 270):
         image = base64.b64encode(_prepare_image(path, rotate)).decode()
         try:
-            return _validated(lambda extra, image=image: _ollama_chat(model, prompt + extra, [image]), repair=(rotate == 0))
+            return _validated(lambda extra, image=image: _ollama_chat(model, bill_prompt + extra, [image], budget),
+                              repair=(rotate == 0), parse=_parse_bill)
         except ValueError as exc:
             last = str(exc)
-    raise ValueError(f"Could not read a valid expense from this photo ({last}). Try a straighter, closer photo or enter it manually.")
+    raise ValueError(f"Could not read a valid bill from this photo ({last}). Try a straighter, closer photo or enter it manually.")
 
 
 def extract(attachment_id: str, kind: str, user_id: str) -> dict:
     """kind is 'receipt image' or 'voice note'. user_id must be the uploader. Provider is chosen by FINMATE_LLM_PROVIDER."""
     _assert_owner(attachment_id, user_id)
     path = find_attachment(attachment_id)
+    # A voice note is one expense ("fields"); a photo is a whole bill with line items ("bill").
+    key = "fields" if kind == "voice note" else "bill"
     if os.environ.get("FINMATE_FAKE_VISION") == "1":
-        return {"fields": _fake(kind), "attachment_id": attachment_id}
-    fields = _ollama_extract(path, kind) if llm.provider() == "ollama" else _gemini_extract(path, kind)
-    return {"fields": fields, "attachment_id": attachment_id}
+        return {key: _fake(kind), "attachment_id": attachment_id}
+    out = _ollama_extract(path, kind) if llm.provider() == "ollama" else _gemini_extract(path, kind)
+    return {key: out, "attachment_id": attachment_id}

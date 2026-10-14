@@ -71,7 +71,7 @@ class FakeLlm(BaseLlm):
             return LlmResponse(content=types.Content(role="model", parts=[types.Part(text=msg)]))
 
         if "Orchestrator Agent" in system:
-            if text.startswith("CONFIRMED EXPENSE"):
+            if text.startswith("CONFIRMED EXPENSE") or text.startswith("CONFIRMED BILL"):
                 order = ["receipt_agent", "budget_agent", "insights_agent", "family_agent"]
                 for name in order:
                     if name not in done:
@@ -81,6 +81,10 @@ class FakeLlm(BaseLlm):
                 return call("receipt_agent", request=f"capture: {text}")
             return say("Please confirm: Uber ₹450 Transport.")
         if "Receipt Agent" in system:
+            if text.startswith("CONFIRMED BILL"):
+                if "save_bill" not in done:
+                    return call("save_bill", confirmation_id=text.split("confirmation_id=")[1].split()[0])
+                return say("Saved the bill. " + json.dumps(_find(resp["save_bill"], "alerts")))
             if text.startswith("CONFIRMED EXPENSE"):
                 if "save_expense" not in done:
                     return call("save_expense", **json.loads(text.split("EXPENSE", 1)[1]))
@@ -88,10 +92,8 @@ class FakeLlm(BaseLlm):
             att = text.split("attachment_id=")[1].split("]")[0].split()[0].strip("]")
             if "ocr_receipt" not in done:
                 return call("ocr_receipt", attachment_id=att)
-            if "propose_expense" not in done:
-                f = _find(resp["ocr_receipt"], "fields")
-                return call("propose_expense", amount=f["amount"], date=f["date"], merchant=f["merchant"],
-                            category=f["category"], source="receipt", note=f["note"])
+            if "propose_bill" not in done:
+                return call("propose_bill", draft_id=_find(resp["ocr_receipt"], "draft_id"))
             return say("Proposed Uber ₹450 Transport. Please confirm.")
         if "Budget Agent" in system:
             if "get_budget_status" not in done:
@@ -153,15 +155,19 @@ def test_cab_receipt_flows_through_all_five_agents(env):
         s = await sessions.create_session(app_name="finmate", user_id="u_ravi")
         try:
             t1 = await _run(runner, s.id, "[Receipt upload attachment_id=abc123] please capture this")
-            proposals = [e for e in t1 if e["kind"] == "tool_result" and e["tool"] == "propose_expense"]
+            proposals = [e for e in t1 if e["kind"] == "tool_result" and e["tool"] == "propose_bill"]
             assert proposals, [e for e in t1 if e["kind"] != "agent_end"]
+            # The model only passed an id: the full bill (with items) travels in the raw result for the UI.
+            raw = proposals[0].get("raw")
+            bill = _find(raw, "bill_proposal") if raw is not None else None
+            assert bill is None or bill["items"][0]["category"] == "Transport"
             assert services.get_expenses("u_ravi", 1) == [] or all(
                 e["merchant"] != "Uber" or e["date"] != "2026-10-08" for e in services.get_expenses("u_ravi", 1))
 
-            confirmed = json.dumps({"amount": 450, "date": "2026-10-08",
-                                    "merchant": "Uber", "category": "Transport", "source": "receipt",
-                                    "note": "Home to Office"})
-            t2 = await _run(runner, s.id, "CONFIRMED EXPENSE " + confirmed)
+            confirmed = {"merchant": "Uber", "date": "2026-10-08", "total": 450, "source": "receipt",
+                         "items": [{"name": "Home to Office", "amount": 450, "category": "Transport"}]}
+            services.put_draft("u_ravi", "c-test", "confirmed", confirmed)
+            t2 = await _run(runner, s.id, "CONFIRMED BILL confirmation_id=c-test")
         finally:
             for ts in toolsets:
                 await ts.close()
@@ -171,10 +177,11 @@ def test_cab_receipt_flows_through_all_five_agents(env):
     agents_seen = {e["agent"] for e in t2 if e["kind"] == "agent_start"}
     assert {"orchestrator", "receipt_agent", "budget_agent", "insights_agent", "family_agent"} <= agents_seen
     tools_used = [e["tool"] for e in t2 if e["kind"] == "tool_call"]
-    for t in ("save_expense", "get_budget_status", "analyze_trends", "save_advice", "get_family_view"):
+    for t in ("save_bill", "get_budget_status", "analyze_trends", "save_advice", "get_family_view"):
         assert t in tools_used
     saved = services.get_expenses("u_ravi", 1)
-    assert any(e["merchant"] == "Uber" and e["amount"] == 450 for e in saved)
+    assert any(e["merchant"] == "Uber" and e["amount"] == 450 and e["bill_id"] for e in saved)
+    assert services.get_draft("u_ravi", "c-test", "confirmed") is None       # consumed once saved
     assert services.list_alerts("u_ravi")[0]["level"] == "exceeded"
     assert services.get_advice_history("u_ravi")[0]["text"] == "Take the metro."
 

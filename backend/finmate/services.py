@@ -1,4 +1,5 @@
 """Business logic behind every agent tool. Pure functions over the shared Postgres memory."""
+import json
 from datetime import timedelta
 
 from . import db
@@ -132,7 +133,16 @@ def delete_budget(user_id: str, owner_type: str, owner_id: str, category: str) -
 def delete_expense(user_id: str, expense_id: int) -> bool:
     """Delete one of the user's own expenses. Returns False if it does not exist or is not theirs."""
     with db.connect() as c:
-        return c.execute("DELETE FROM expenses WHERE id=%s AND user_id=%s", (expense_id, user_id)).rowcount > 0
+        row = c.execute("DELETE FROM expenses WHERE id=%s AND user_id=%s RETURNING bill_id", (expense_id, user_id)).fetchone()
+        if row is None:
+            return False
+        if row["bill_id"]:  # keep the parent bill truthful: new total, or gone when its last item is removed
+            left = c.execute("SELECT COALESCE(SUM(amount),0) AS t, COUNT(*) AS n FROM expenses WHERE bill_id=%s", (row["bill_id"],)).fetchone()
+            if left["n"] == 0:
+                c.execute("DELETE FROM bills WHERE id=%s", (row["bill_id"],))
+            else:
+                c.execute("UPDATE bills SET total=%s WHERE id=%s", (round(left["t"], 2), row["bill_id"]))
+        return True
 
 
 def normalize_category(category: str) -> str:
@@ -184,8 +194,9 @@ def save_expense(user_id: str, amount: float, date: str, merchant: str, category
     return {"expense": expense, "alerts": alerts}
 
 
-def save_bill(user_id: str, merchant: str, date: str, items: list[dict], note: str = "",
-              source: str = "form") -> dict:
+def save_bill(user_id: str, merchant: str, date: str, items: list[dict], note: str = "", source: str = "form", *,
+              bill_number: str = "", payment_method: str = "", tax_fees: float = 0, discount: float = 0,
+              attachment_id: str | None = None) -> dict:
     """Save one bill with several items. Each item becomes an expense linked to the bill, so budgets
     still work per category. A category that crosses a line raises one alert for the whole bill."""
     if not items:
@@ -195,23 +206,74 @@ def save_bill(user_id: str, merchant: str, date: str, items: list[dict], note: s
         amount = float(it.get("amount") or 0)
         if amount <= 0:
             raise ValueError("every item needs an amount greater than zero")
-        rows.append((str(it.get("name") or "").strip(), amount, normalize_category(it.get("category") or "")))
+        rows.append((str(it.get("name") or "").strip(), amount, normalize_category(it.get("category") or ""),
+                     it.get("quantity"), it.get("unit_price")))
     month = str(date)[:7]
     with db.connect() as c:
         u = _user(c, user_id)
+        if attachment_id:  # only link a receipt photo the user actually uploaded
+            own = c.execute("SELECT 1 FROM attachments WHERE id=%s AND user_id=%s", (attachment_id, user_id)).fetchone()
+            attachment_id = attachment_id if own else None
         before = {cat: _before(c, u, cat, month) for cat in {r[2] for r in rows}}
+        total = round(sum(r[1] for r in rows), 2)
         bill = _row(c.execute(
-            "INSERT INTO bills (user_id, merchant, date, note, source) VALUES (%s,%s,%s,%s,%s) RETURNING *",
-            (user_id, merchant, date, note, source)).fetchone())
+            "INSERT INTO bills (user_id, merchant, date, note, source, total, tax_fees, discount, bill_number, payment_method,"
+            " attachment_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+            (user_id, merchant, date, note, source, total, float(tax_fees or 0), float(discount or 0), bill_number,
+             payment_method, attachment_id)).fetchone())
         saved = [_row(c.execute(
-            "INSERT INTO expenses (user_id, amount, date, merchant, category, source, note, bill_id)"
-            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
-            (user_id, amount, date, merchant, cat, source, name, bill["id"])).fetchone())
-            for name, amount, cat in rows]
+            "INSERT INTO expenses (user_id, amount, date, merchant, category, source, note, bill_id, quantity, unit_price)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+            (user_id, amount, date, merchant, cat, source, name, bill["id"], qty, unit)).fetchone())
+            for name, amount, cat, qty, unit in rows]
         alerts = [a for cat in before for a in _alerts_for(c, u, cat, month, before[cat])]
     bill["items"] = saved
-    bill["total"] = round(sum(i["amount"] for i in saved), 2)
+    bill["total"] = total
     return {"bill": bill, "alerts": alerts}
+
+
+def get_bill(user_id: str, bill_id: int) -> dict | None:
+    """One of the user's bills with all its line items, or None."""
+    with db.connect() as c:
+        bill = c.execute("SELECT * FROM bills WHERE id=%s AND user_id=%s", (bill_id, user_id)).fetchone()
+        if bill is None:
+            return None
+        bill = _row(bill)
+        bill["items"] = [_row(r) for r in c.execute("SELECT * FROM expenses WHERE bill_id=%s ORDER BY id", (bill_id,))]
+    return bill
+
+
+def list_bills(user_id: str, days: int = 90) -> list[dict]:
+    """The user's recent bills (newest first), each with its items."""
+    since = (db.today() - timedelta(days=days)).isoformat()
+    with db.connect() as c:
+        bills = [_row(r) for r in c.execute(
+            "SELECT * FROM bills WHERE user_id=%s AND date>=%s ORDER BY date DESC, id DESC", (user_id, since))]
+        for b in bills:
+            b["items"] = [_row(r) for r in c.execute("SELECT * FROM expenses WHERE bill_id=%s ORDER BY id", (b["id"],))]
+    return bills
+
+
+# ---- bill drafts: the model passes an id, the server holds the content ---------------------------------
+def put_draft(user_id: str, draft_id: str, kind: str, payload: dict) -> None:
+    with db.connect() as c:
+        c.execute("DELETE FROM bill_drafts WHERE created_at < to_char((now() - interval '2 days') AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS')")
+        c.execute("INSERT INTO bill_drafts (id, user_id, kind, payload) VALUES (%s,%s,%s,%s)"
+                  " ON CONFLICT (id) DO UPDATE SET payload=EXCLUDED.payload, kind=EXCLUDED.kind, user_id=EXCLUDED.user_id,"
+                  " created_at=to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS')",
+                  (draft_id, user_id, kind, json.dumps(payload)))
+
+
+def get_draft(user_id: str, draft_id: str, kind: str) -> dict | None:
+    """Same answer for "missing" and "someone else's", so ids cannot be probed."""
+    with db.connect() as c:
+        r = c.execute("SELECT payload FROM bill_drafts WHERE id=%s AND user_id=%s AND kind=%s", (draft_id, user_id, kind)).fetchone()
+    return json.loads(r["payload"]) if r else None
+
+
+def drop_draft(user_id: str, draft_id: str) -> None:
+    with db.connect() as c:
+        c.execute("DELETE FROM bill_drafts WHERE id=%s AND user_id=%s", (draft_id, user_id))
 
 
 def delete_bill(user_id: str, bill_id: int) -> bool:

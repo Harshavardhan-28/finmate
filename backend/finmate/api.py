@@ -17,10 +17,11 @@ from google.adk.apps import App  # noqa: E402
 from google.adk.runners import Runner  # noqa: E402
 from google.adk.sessions import InMemorySessionService  # noqa: E402
 from google.genai import types  # noqa: E402
-from pydantic import BaseModel  # noqa: E402
+from pydantic import BaseModel, ValidationError  # noqa: E402
 
 from . import account, agents, auth, db, ledger, llm, security, services, vision  # noqa: E402
 from . import tool_launcher  # noqa: E402
+from .schemas import BillProposal  # noqa: E402
 from .trace import TracePlugin, current_queue  # noqa: E402
 
 APP_NAME = "finmate"
@@ -155,6 +156,10 @@ async def run_turn(user_id: str, text: str):
                     data = parse_mcp(raw)
                     if item["tool"] == "propose_expense" and isinstance(data, dict) and "proposal" in data:
                         yield sse({"type": "proposal", "proposal": data["proposal"]})
+                    if item["tool"] == "propose_bill" and isinstance(data, dict) and "bill_proposal" in data:
+                        yield sse({"type": "bill_proposal", "bill": data["bill_proposal"]})
+                    if item["tool"] == "save_bill" and isinstance(data, dict) and "bill" in data:
+                        yield sse({"type": "bill_saved", "bill": data["bill"], "alerts": data.get("alerts", [])})
                     if item["tool"] == "save_expense" and isinstance(data, dict) and "expense" in data:
                         yield sse({"type": "saved", "expense": data["expense"], "alerts": data.get("alerts", [])})
                 continue
@@ -185,6 +190,20 @@ class ConfirmIn(BaseModel):
     category: str
     source: str = "form"
     note: str = ""
+
+
+@app.post("/api/confirm_bill")
+async def confirm_bill(body: dict, user: dict = Depends(auth.current_user)):
+    """The user's reviewed bill (items may have been edited). It is re-validated and re-reconciled here, parked as a
+    server-side 'confirmed' draft, and the agents are told only its id, so no model ever re-types the line items."""
+    body = {k: v for k, v in body.items() if k not in ("draft_id",)}
+    try:
+        bill = BillProposal.model_validate(body)
+    except ValidationError as exc:
+        raise HTTPException(422, "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors())) from exc
+    cid = "c-" + uuid.uuid4().hex[:12]
+    services.put_draft(user["user_id"], cid, "confirmed", bill.as_json())
+    return stream(run_turn(user["user_id"], f"CONFIRMED BILL confirmation_id={cid}"))
 
 
 @app.get("/api/health")

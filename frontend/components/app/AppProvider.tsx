@@ -8,7 +8,7 @@ import {
 import { setCurrency } from "@/lib/format";
 import { toast } from "sonner";
 import { sampleReceipt } from "@/lib/sample";
-import type { AuthUser, Dashboard, Expense, Proposal, StreamEvent, TraceItem } from "@/lib/types";
+import type { AuthUser, BillProposal, Dashboard, Expense, Proposal, StreamEvent, TraceItem } from "@/lib/types";
 import { money } from "@/lib/format";
 
 type NewMsg = Msg extends infer M ? (M extends { id: number } ? Omit<M, "id"> : never) : never;
@@ -30,6 +30,7 @@ type Ctx = {
     messages: Msg[]; trace: TraceItem[]; busy: boolean;
     send: (text: string) => void;
     confirm: (id: number, p: Proposal) => void;
+    confirmBill: (id: number, b: BillProposal) => void;
     discard: (id: number) => void;
   };
   /** Receipt photos and voice notes, kept apart from the chat. */
@@ -38,6 +39,7 @@ type Ctx = {
     sendFile: (kind: "receipt" | "voice", blob: Blob, filename: string) => Promise<void>;
     sample: () => Promise<void>;
     confirm: (id: number, p: Proposal) => void;
+    confirmBill: (id: number, b: BillProposal) => void;
     discard: (id: number) => void;
     clear: () => void;
   };
@@ -102,7 +104,7 @@ function Session({ user, setUser, children }: { user: AuthUser; setUser: (u: Aut
   const add = (lane: Lane, m: NewMsg) =>
     setLanes((prev) => ({ ...prev, [lane]: [...prev[lane], { ...m, id: ids.current.msg++ } as Msg] }));
   const setProposalState = (id: number, state: "done" | "discarded") => {
-    const mark = (list: Msg[]) => list.map((m) => (m.id === id && m.role === "proposal" ? { ...m, state } : m));
+    const mark = (list: Msg[]) => list.map((m) => (m.id === id && (m.role === "proposal" || m.role === "bill") ? { ...m, state } : m));
     setLanes((prev) => ({ chat: mark(prev.chat), capture: mark(prev.capture) }));
   };
   const laneOf = (id: number): Lane => (lanes.capture.some((m) => m.id === id) ? "capture" : "chat");
@@ -116,6 +118,12 @@ function Session({ user, setUser, children }: { user: AuthUser; setUser: (u: Aut
         void _t;
         setTrace((prev) => [...prev.slice(-250), { ...rest, id: ids.current.trace++, turn }]);
       } else if (e.type === "proposal") add(lane, { role: "proposal", proposal: e.proposal, state: "pending" });
+      else if (e.type === "bill_proposal") add(lane, { role: "bill", bill: e.bill, state: "pending" });
+      else if (e.type === "bill_saved") {
+        void refresh();
+        toast.success(`Saved ${e.bill.merchant} · ${money(e.bill.total)} · ${e.bill.items.length} ${e.bill.items.length === 1 ? "item" : "items"}`);
+        e.alerts.forEach((a) => (a.level === "exceeded" ? toast.error(a.message) : toast.warning(a.message)));
+      }
       else if (e.type === "saved") {
         void refresh();
         toast.success(`Saved ${e.expense.merchant} · ${money(e.expense.amount)}`);
@@ -146,6 +154,13 @@ function Session({ user, setUser, children }: { user: AuthUser; setUser: (u: Aut
     void run(lane, "/api/confirm", { amount: p.amount, date: p.date, merchant: p.merchant, category: p.category, source: p.source, note: p.note });
   };
 
+  const confirmBill = (id: number, b: BillProposal) => {
+    const lane = laneOf(id);
+    setProposalState(id, "done");
+    add(lane, { role: "user", text: `Confirmed bill: ${b.merchant} · ${money(b.total)} · ${b.items.length} ${b.items.length === 1 ? "item" : "items"}` });
+    void run(lane, "/api/confirm_bill", { ...b });
+  };
+
   async function sendFile(kind: "receipt" | "voice", blob: Blob, filename: string) {
     setLanes((prev) => ({ ...prev, capture: [] })); // each capture starts a fresh review
     add("capture", {
@@ -170,11 +185,11 @@ function Session({ user, setUser, children }: { user: AuthUser; setUser: (u: Aut
       await refresh();
     },
     chat: {
-      messages: lanes.chat, trace, busy, send, confirm,
+      messages: lanes.chat, trace, busy, send, confirm, confirmBill,
       discard: (id) => setProposalState(id, "discarded"),
     },
     capture: {
-      messages: lanes.capture, busy, sendFile, confirm,
+      messages: lanes.capture, busy, sendFile, confirm, confirmBill,
       sample: async () => sendFile("receipt", await sampleReceipt(), "sample-uber-receipt.png"),
       discard: (id) => setProposalState(id, "discarded"),
       clear: () => setLanes((prev) => ({ ...prev, capture: [] })),
