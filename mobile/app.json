@@ -1,0 +1,60 @@
+{
+  "expo": {
+    "name": "FinMate",
+    "slug": "finmate",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "dev.finmate.app",
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "package": "dev.finmate.app"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-font",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "FinMate uses the camera to read your receipts.",
+          "microphonePermission": false
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "FinMate reads receipt photos you choose.",
+          "cameraPermission": "FinMate uses the camera to read your receipts."
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "FinMate listens when you say what you spent."
+        }
+      ],
+      "expo-web-browser"
+    ],
+    "scheme": "finmate",
+    "backgroundColor": "#f4f3ee"
+  }
+}

@@ -1,7 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { CATEGORIES, type Proposal } from "@/lib/types";
-import { blobToWav } from "@/lib/audio";
 
 export type Msg =
   | { id: number; role: "user" | "assistant" | "error"; text: string; image?: string }
@@ -10,7 +9,7 @@ export type Msg =
 const PROMPTS = ["How are my budgets?", "Where can I save money?", "Show my family's spending"];
 
 /** Minimal markdown: **bold** and "* " bullets, enough for agent replies. */
-function Rich({ text }: { text: string }) {
+export function Rich({ text }: { text: string }) {
   const inline = (s: string) =>
     s.split(/(\*\*[^*]+\*\*)/g).map((p, i) =>
       p.startsWith("**") ? <b key={i}>{p.slice(2, -2)}</b> : <span key={i}>{p}</span>,
@@ -35,7 +34,7 @@ function Rich({ text }: { text: string }) {
   return <>{blocks}</>;
 }
 
-function ConfirmCard({
+export function ConfirmCard({
   msg, onConfirm, onDiscard, disabled,
 }: {
   msg: Extract<Msg, { role: "proposal" }>;
@@ -59,7 +58,7 @@ function ConfirmCard({
         {p.source === "form" ? "Fill in the details." : `Read from your ${p.source}. Fix anything that is off before saving.`}
       </div>
       <div className="fields">
-        <label className={`field ${unclear("amount")}`}>Amount (₹)
+        <label className={`field ${unclear("amount")}`}>Amount
           <input type="number" min="0" disabled={locked} value={p.amount || ""} onChange={(e) => set("amount", Number(e.target.value))} />
         </label>
         <label className={`field ${unclear("date")}`}>Date
@@ -92,19 +91,11 @@ export default function Chat(props: {
   busy: boolean;
   userName: string;
   onSend: (text: string) => void;
-  onFile: (kind: "receipt" | "voice", blob: Blob, filename: string) => void;
-  onSample: () => void;
-  onForm: () => void;
   onConfirm: (id: number, p: Proposal) => void;
   onDiscard: (id: number) => void;
 }) {
   const { messages, busy } = props;
   const [text, setText] = useState("");
-  const [recording, setRecording] = useState(false);
-  const [micError, setMicError] = useState("");
-  const recorder = useRef<MediaRecorder | null>(null);
-  const chunks = useRef<Blob[]>([]);
-  const fileRef = useRef<HTMLInputElement>(null);
   const logRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -117,50 +108,15 @@ export default function Chat(props: {
     setText("");
   };
 
-  async function toggleMic() {
-    setMicError("");
-    if (recording) {
-      recorder.current?.stop();
-      return;
-    }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const rec = new MediaRecorder(stream);
-      chunks.current = [];
-      rec.ondataavailable = (e) => chunks.current.push(e.data);
-      rec.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop());
-        setRecording(false);
-        try {
-          const wav = await blobToWav(new Blob(chunks.current, { type: rec.mimeType }));
-          props.onFile("voice", wav, "voice-note.wav");
-        } catch {
-          setMicError("Could not read the recording. Try again or upload a WAV/MP3 file.");
-        }
-      };
-      rec.start();
-      recorder.current = rec;
-      setRecording(true);
-    } catch {
-      setMicError("Microphone blocked. Allow mic access in the browser, or upload an audio file.");
-    }
-  }
-
-  function picked(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0];
-    e.target.value = "";
-    if (!f) return;
-    props.onFile(f.type.startsWith("audio/") ? "voice" : "receipt", f, f.name);
-  }
-
   return (
     <div className="chat">
       <div className="chat-log" ref={logRef}>
         {messages.length === 0 && (
           <div className="empty">
             <h3>Hi {props.userName}, what did you spend?</h3>
-            Snap a receipt, record a voice note, type &quot;spent 450 on cab&quot;, or ask about your budgets.
-            The Orchestrator hands the work to its four agents.
+            Type &quot;spent 450 on cab&quot;, or ask about your budgets, your family&apos;s spending, or where you can save.
+            The Orchestrator hands the work to its four agents. To log a receipt, a voice note or a bill, use{" "}
+            <a href="/app/receipts" className="textlink">Receipts</a>.
           </div>
         )}
         {messages.map((m) =>
@@ -185,16 +141,6 @@ export default function Chat(props: {
       )}
 
       <div className="composer">
-        <div className="tools">
-          <button className="tool" onClick={() => fileRef.current?.click()} disabled={busy}>Upload receipt</button>
-          <button className={`tool ${recording ? "rec" : ""}`} onClick={toggleMic} disabled={busy && !recording}>
-            {recording ? "Stop recording" : "Voice note"}
-          </button>
-          <button className="tool" onClick={props.onSample} disabled={busy}>Try sample receipt</button>
-          <button className="tool" onClick={props.onForm} disabled={busy}>Add by form</button>
-          <input ref={fileRef} type="file" accept="image/*,audio/*" hidden onChange={picked} />
-        </div>
-        {micError && <div className="muted" style={{ color: "var(--red)" }}>{micError}</div>}
         <form className="composer-row" onSubmit={(e) => { e.preventDefault(); send(); }}>
           <input type="text" value={text} onChange={(e) => setText(e.target.value)} disabled={busy}
             placeholder="Message FinMate…" aria-label="Message" />

@@ -6,3 +6,11 @@ python-multipart
 python-dotenv
 pytest
 httpx
+psycopg[binary]>=3.2
+PyJWT>=2.8
+bcrypt>=4.1
+httpx2
+# Local models (only needed when FINMATE_LLM_PROVIDER=ollama)
+litellm>=1.60
+faster-whisper>=1.1
+pillow>=10

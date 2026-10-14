@@ -3,22 +3,24 @@
 One Orchestrator Agent talks to the user and delegates to four specialist agents (wrapped as
 AgentTools so the Orchestrator stays in control and combines their answers). Every specialist
 reaches its tools through the FinMate MCP server and sees only its own subset.
+
+Identity is never delegated to the model. Each MCP call carries a short-lived signed tool token minted from the
+Runner's authenticated user id (`McpToolset(header_provider=...)`), and the tool server derives the user from that
+token alone (identity.py). The prompts therefore do not mention user ids at all.
 """
 import os
-import sys
 from pathlib import Path
 
 from google.adk.agents import LlmAgent
 from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.tools import AgentTool
-from google.adk.tools.mcp_tool import McpToolset, StdioConnectionParams
+from google.adk.tools.mcp_tool import McpToolset, StreamableHTTPConnectionParams
 from google.genai import types
-from mcp import StdioServerParameters
 
-from . import db
+from . import db, identity, llm
+from .mcp_server import mcp_url
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_MODEL = os.environ.get("FINMATE_MODEL", "gemini-3.8-flash")
 
 RECEIPT_TOOLS = ["ocr_receipt", "transcribe_voice", "propose_expense", "save_expense"]
 BUDGET_TOOLS = ["get_budget_status", "set_budget", "get_alerts"]
@@ -27,22 +29,22 @@ INSIGHTS_TOOLS = ["get_expenses", "analyze_trends", "suggest_alternatives",
                   "get_advice_history", "save_advice"]
 
 
-def mcp_toolset(tool_names: list[str]) -> McpToolset:
-    """A connection to the FinMate MCP server restricted to the given tools."""
-    server = StdioServerParameters(
-        command=sys.executable, args=["-m", "finmate.mcp_server"],
-        env={**os.environ}, cwd=str(BACKEND_DIR),
-    )
-    return McpToolset(connection_params=StdioConnectionParams(server_params=server, timeout=30),
-                      tool_filter=tool_names)
+def _tool_headers(ctx: ReadonlyContext) -> dict[str, str]:
+    """Called by ADK on every tool call/listing. `ctx.user_id` is the Runner's user, i.e. the verified login."""
+    return {"Authorization": f"Bearer {identity.mint_tool_token(ctx.user_id)}"}
+
+
+def mcp_toolset(tool_names: list[str], url: str | None = None) -> McpToolset:
+    """A connection to the FinMate MCP server (streamable HTTP) restricted to the given tools."""
+    return McpToolset(connection_params=StreamableHTTPConnectionParams(url=url or mcp_url(), timeout=30),
+                      tool_filter=tool_names, header_provider=_tool_headers)
 
 
 def _instruction(body: str):
-    """Instruction provider: injects today's date and the signed-in user from session state."""
+    """Instruction provider: injects today's date. The user's identity is deliberately NOT in the prompt."""
     def provider(ctx: ReadonlyContext) -> str:
-        uid = ctx.state.get("user_id", "u_ravi")
-        return (f"Today's date is {db.today().isoformat()}. The signed-in user_id is {uid}. "
-                f"Currency is Indian rupees (₹).\n\n{body}")
+        return (f"Today's date is {db.today().isoformat()}. Currency is Indian rupees (₹). "
+                f"Every tool already acts for the signed-in user; never ask for, guess or pass a user id.\n\n{body}")
     return provider
 
 
@@ -61,13 +63,14 @@ CAPTURE (when asked to extract or capture an expense):
   and say the user must confirm.
 
 SAVE (only when the request says the user CONFIRMED and gives exact fields):
-- Call save_expense with exactly those fields and the user_id.
+- Call save_expense with exactly those fields.
 - Report the saved expense and copy any budget alerts from the result verbatim (level, pct, message).
 Never invent values. If a tool errors, say so plainly."""
 
 BUDGET_BODY = """You are the Budget Agent of FinMate AI. Goal: keep each person and the family within
 their monthly category limits. Use get_budget_status for numbers (never guess), get_alerts for recent
-alerts. Levels: warning at 80%, exceeded at 100%.
+alerts. Levels: ok, warning (at the user's own warning threshold, 80% by default) and exceeded
+at 100%. Trust the level field returned by the tools rather than assuming a percentage.
 - Report the relevant category's limit, spent and pct for the user's personal budget and the family
   budget when one exists.
 - You may PROPOSE a limit change, but call set_budget only if the request says the user explicitly
@@ -97,7 +100,7 @@ No generic financial advice, no investment advice, nothing not supported by the 
 ORCHESTRATOR_BODY = """You are the Orchestrator Agent of FinMate AI, a household finance assistant. You are
 the only agent the user talks to. Understand the request, plan the steps, delegate to specialist agents
 (receipt_agent, budget_agent, family_agent, insights_agent), and combine their results into ONE short,
-friendly reply. Always include "user_id=<id>" in every request you send to a specialist.
+friendly reply.
 
 ROUTING
 - A message that starts with "[Receipt upload attachment_id=..." or "[Voice note attachment_id=...":
@@ -121,14 +124,17 @@ Never invent numbers; use only what specialists return. Do not give investment a
 120 words unless listing data."""
 
 
-def build_agents(model=DEFAULT_MODEL):
-    """Create the orchestrator and its toolsets. Returns (orchestrator, toolsets_to_close)."""
+def build_agents(model=None, *, url: str | None = None):
+    """Create the orchestrator and its toolsets. Returns (orchestrator, toolsets_to_close).
+
+    `model` forces one model for every agent (tests); by default each agent gets its own from llm.model_for().
+    """
     specialists, toolsets = [], []
 
     def make(name: str, description: str, body: str, tools: list[str]) -> LlmAgent:
-        ts = mcp_toolset(tools)
+        ts = mcp_toolset(tools, url)
         toolsets.append(ts)
-        agent = LlmAgent(name=name, model=model, description=description,
+        agent = LlmAgent(name=name, model=model or llm.model_for(name.removesuffix("_agent")), description=description,
                          instruction=_instruction(body), tools=[ts], generate_content_config=_CFG)
         specialists.append(agent)
         return agent
@@ -143,7 +149,7 @@ def build_agents(model=DEFAULT_MODEL):
          "specific cheaper alternatives.", INSIGHTS_BODY, INSIGHTS_TOOLS)
 
     orchestrator = LlmAgent(
-        name="orchestrator", model=model,
+        name="orchestrator", model=model or llm.model_for("orchestrator"),
         description="FinMate AI supervisor that plans and delegates to the specialist agents.",
         instruction=_instruction(ORCHESTRATOR_BODY),
         tools=[AgentTool(agent=a) for a in specialists],

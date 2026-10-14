@@ -1,9 +1,17 @@
 export type User = { id: string; name: string; role: "admin" | "member"; family_id: string };
+export type AuthUser = {
+  user_id: string; name: string; role: "admin" | "member"; family_id: string; email: string | null;
+  currency: string; warn_pct: number; has_password: boolean; has_google: boolean;
+};
+export type FamilyMember = { id: string; name: string; email: string | null; role: "admin" | "member"; has_password: boolean; has_google: boolean };
+export type Status = { month: string; warn_pct: number; personal: Budget[]; family: Budget[] };
+export type SavedBill = { bill: { id: number; merchant: string; date: string; total: number; items: Expense[] }; alerts: Alert[] };
+export type SavedExpense = { expense: Expense; alerts: Alert[] };
 export type Level = "ok" | "warning" | "exceeded";
 export type Budget = { category: string; limit: number; spent: number; pct: number; level: Level };
 export type Expense = {
   id: number; user_id: string; amount: number; date: string; merchant: string;
-  category: string; source: string; note: string;
+  category: string; source: string; note: string; bill_id: number | null;
 };
 export type Alert = { category: string; level: Level; pct: number; message: string; scope: string; created_at: string; user?: string };
 export type Proposal = {
@@ -16,7 +24,7 @@ export type FamilyView =
   | { month: string; household_total: number; members: Member[]; family_budgets: Budget[]; recent_alerts: Alert[] };
 export type Dashboard = {
   user: User;
-  budgets: { month: string; personal: Budget[]; family: Budget[] };
+  budgets: Status;
   recent_expenses: Expense[];
   alerts: Alert[];
   advice: { text: string; created_at: string }[];

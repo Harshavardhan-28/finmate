@@ -4,9 +4,7 @@ from finmate import db, services
 
 
 @pytest.fixture(autouse=True)
-def fresh_db(tmp_path, monkeypatch):
-    monkeypatch.setenv("FINMATE_DB", str(tmp_path / "t.db"))
-    monkeypatch.setenv("FINMATE_TODAY", "2026-10-08")
+def fresh_db():
     db.init_db(reset=True)
 
 

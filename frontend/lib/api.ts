@@ -1,4 +1,6 @@
-import type { Dashboard, StreamEvent, User } from "./types";
+import type {
+  AuthUser, Dashboard, Expense, FamilyMember, SavedBill, SavedExpense, Status, StreamEvent,
+} from "./types";
 
 export const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -10,27 +12,86 @@ async function json<T>(res: Response): Promise<T> {
   return res.json();
 }
 
-export const getUsers = () => fetch(`${API}/api/users`).then(json<User[]>);
-export const getDashboard = (userId: string) =>
-  fetch(`${API}/api/dashboard?user_id=${encodeURIComponent(userId)}`).then(json<Dashboard>);
+/** Every call sends the httpOnly session cookie; a 401 means the session is gone. */
+const call = (path: string, init: RequestInit = {}) =>
+  fetch(`${API}${path}`, { credentials: "include", ...init });
+const post = (path: string, body?: unknown) =>
+  call(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+
+export const getMe = () => call("/api/auth/me").then(json<{ user: AuthUser }>).then((r) => r.user);
+export const getAuthConfig = () => call("/api/auth/config").then(json<{ google: boolean }>);
+export const login = (email: string, password: string) =>
+  post("/api/auth/login", { email, password }).then(json<{ user: AuthUser }>).then((r) => r.user);
+export const register = (name: string, email: string, password: string) =>
+  post("/api/auth/register", { name, email, password }).then(json<{ user: AuthUser }>).then((r) => r.user);
+export const logout = () => post("/api/auth/logout").then(json);
+const send = <T,>(method: string, path: string, body?: unknown) =>
+  call(path, {
+    method,
+    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  }).then(json<T>);
+
+export const updateProfile = (name: string, email: string) =>
+  send<{ user: AuthUser }>("PATCH", "/api/account/profile", { name, email }).then((r) => r.user);
+export const changePassword = (current_password: string, new_password: string) =>
+  send<{ ok: boolean }>("POST", "/api/account/password", { current_password, new_password });
+export const signOutEverywhere = () => send<{ ok: boolean }>("POST", "/api/account/sign-out-everywhere");
+export const updatePreferences = (currency: string, warn_pct: number) =>
+  send<{ user: AuthUser }>("PATCH", "/api/account/preferences", { currency, warn_pct }).then((r) => r.user);
+export const deleteAccount = (confirm_email: string, password: string) =>
+  send<{ ok: boolean }>("DELETE", "/api/account", { confirm_email, password });
+export async function downloadExport() {
+  const res = await call("/api/account/export");
+  if (!res.ok) throw new Error(`Export failed (${res.status})`);
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = /filename="([^"]+)"/.exec(res.headers.get("content-disposition") ?? "")?.[1] ?? "finmate-expenses.csv";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+export const listMembers = () => send<FamilyMember[]>("GET", "/api/family/members");
+export const addMember = (m: { name: string; email: string; password: string; role: string }) =>
+  send<FamilyMember[]>("POST", "/api/family/members", m);
+export const setMemberRole = (id: string, role: string) =>
+  send<FamilyMember[]>("PATCH", `/api/family/members/${id}`, { role });
+export const removeMember = (id: string) => send<FamilyMember[]>("DELETE", `/api/family/members/${id}`);
+
+export const addExpense = (e: { amount: number; date: string; merchant: string; category: string; note: string }) =>
+  send<SavedExpense>("POST", "/api/expenses", e);
+export const addBill = (b: { merchant: string; date: string; items: { name: string; amount: number; category: string }[] }) =>
+  send<SavedBill>("POST", "/api/bills", b);
+export const deleteBill = (id: number) => send<{ ok: boolean }>("DELETE", `/api/bills/${id}`);
+export const deleteExpense = (id: number) => send<{ ok: boolean }>("DELETE", `/api/expenses/${id}`);
+export const putBudget = (owner_type: "user" | "family", category: string, monthly_limit: number) =>
+  send<Status>("PUT", "/api/budgets", { owner_type, category, monthly_limit });
+export const deleteBudget = (owner_type: "user" | "family", category: string) =>
+  send<Status>("DELETE", `/api/budgets/${owner_type}/${encodeURIComponent(category)}`);
+
+export const googleLoginUrl = `${API}/api/auth/google/login`;
+
+export const getExpenses = (days = 90) => call(`/api/expenses?days=${days}`).then(json<Expense[]>);
+export const getDashboard = () => call("/api/dashboard").then(json<Dashboard>);
 export const getHealth = () =>
-  fetch(`${API}/api/health`).then(json<{ ok: boolean; llm_configured: boolean; model: string }>);
-export const resetDemo = () => fetch(`${API}/api/reset`, { method: "POST" }).then(json);
+  call("/api/health").then(json<{ ok: boolean; llm_configured: boolean; model: string }>);
+export const resetDemo = () => post("/api/reset").then(json);
 
 export async function upload(file: Blob, filename: string, kind: "receipt" | "voice") {
   const form = new FormData();
   form.append("file", file, filename);
   form.append("kind", kind);
-  return fetch(`${API}/api/upload`, { method: "POST", body: form }).then(json<{ attachment_id: string }>);
+  return call("/api/upload", { method: "POST", body: form }).then(json<{ attachment_id: string }>);
 }
 
 /** POST to an SSE endpoint and call onEvent for every `data:` frame as it arrives. */
 export async function streamPost(path: string, body: unknown, onEvent: (e: StreamEvent) => void) {
-  const res = await fetch(`${API}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const res = await post(path, body);
   if (!res.ok || !res.body) {
     const detail = await res.json().catch(() => ({}));
     throw new Error(detail.detail ?? `Request failed (${res.status})`);

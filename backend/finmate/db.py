@@ -1,46 +1,70 @@
-"""SQLite shared memory for all FinMate agents, plus demo seed data."""
+"""Postgres shared memory for all FinMate agents, plus demo seed data."""
 import os
-import sqlite3
 from contextlib import contextmanager
 from datetime import date, timedelta
-from pathlib import Path
+from functools import lru_cache
 
-DEFAULT_DB = Path(__file__).resolve().parent.parent / "finmate.db"
+import psycopg
+from psycopg.rows import dict_row
+
+DEFAULT_DATABASE_URL = "postgresql://finmate:finmate@localhost:5432/finmate"
 CATEGORIES = [
     "Transport", "Food", "Groceries", "Shopping",
     "Entertainment", "Utilities", "Health", "Other",
 ]
+DEMO_PASSWORD = "demo1234"  # dev-only password for the seeded Ravi and Priya logins
 
-SCHEMA = """
+_NOW = "to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS')"
+SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS families (id TEXT PRIMARY KEY, name TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY, name TEXT NOT NULL,
   role TEXT NOT NULL CHECK (role IN ('admin','member')),
-  family_id TEXT NOT NULL REFERENCES families(id));
+  family_id TEXT NOT NULL REFERENCES families(id),
+  email TEXT UNIQUE, password_hash TEXT, google_sub TEXT UNIQUE);
+CREATE TABLE IF NOT EXISTS bills (
+  id SERIAL PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+  merchant TEXT NOT NULL, date TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'form', created_at TEXT NOT NULL DEFAULT {_NOW});
+ALTER TABLE users ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'INR';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS warn_pct INTEGER NOT NULL DEFAULT 80;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0;
 CREATE TABLE IF NOT EXISTS expenses (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id SERIAL PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id),
-  amount REAL NOT NULL, date TEXT NOT NULL, merchant TEXT NOT NULL,
+  amount DOUBLE PRECISION NOT NULL, date TEXT NOT NULL, merchant TEXT NOT NULL,
   category TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'form',
   note TEXT NOT NULL DEFAULT '', receipt_path TEXT,
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+  created_at TEXT NOT NULL DEFAULT {_NOW});
+ALTER TABLE expenses ADD COLUMN IF NOT EXISTS bill_id INTEGER REFERENCES bills(id) ON DELETE CASCADE;
 CREATE TABLE IF NOT EXISTS budgets (
   owner_type TEXT NOT NULL CHECK (owner_type IN ('user','family')),
-  owner_id TEXT NOT NULL, category TEXT NOT NULL, monthly_limit REAL NOT NULL,
+  owner_id TEXT NOT NULL, category TEXT NOT NULL, monthly_limit DOUBLE PRECISION NOT NULL,
   PRIMARY KEY (owner_type, owner_id, category));
 CREATE TABLE IF NOT EXISTS alerts (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL,
+  id SERIAL PRIMARY KEY, user_id TEXT NOT NULL,
   family_id TEXT NOT NULL, scope TEXT NOT NULL, category TEXT NOT NULL,
-  level TEXT NOT NULL, pct REAL NOT NULL, message TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+  level TEXT NOT NULL, pct DOUBLE PRECISION NOT NULL, message TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT {_NOW});
+CREATE TABLE IF NOT EXISTS attachments (
+  id TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT {_NOW});
 CREATE TABLE IF NOT EXISTS advice (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL,
-  text TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+  id SERIAL PRIMARY KEY, user_id TEXT NOT NULL,
+  text TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT {_NOW});
 """
 
 
-def db_path() -> str:
-    return os.environ.get("FINMATE_DB", str(DEFAULT_DB))
+class Row(dict):
+    """A dict row that also supports positional access, so `fetchone()[0]` keeps working."""
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return list(self.values())[key]
+        return super().__getitem__(key)
+
+
+def database_url() -> str:
+    return os.environ.get("DATABASE_URL", DEFAULT_DATABASE_URL)
 
 
 def today() -> date:
@@ -51,8 +75,7 @@ def today() -> date:
 @contextmanager
 def connect():
     """Yield a connection that commits on success, rolls back on error, and always closes."""
-    conn = sqlite3.connect(db_path())
-    conn.row_factory = sqlite3.Row
+    conn = psycopg.connect(database_url(), row_factory=_row_factory)
     try:
         with conn:
             yield conn
@@ -60,13 +83,24 @@ def connect():
         conn.close()
 
 
+def _row_factory(cur):
+    make = dict_row(cur)
+    return lambda values: Row(make(values))
+
+
+@lru_cache(maxsize=1)
+def _demo_hash() -> str:
+    from .passwords import hash_password
+    return hash_password(DEMO_PASSWORD)
+
+
 def init_db(reset: bool = False) -> None:
     """Create the schema and load demo data. reset=True wipes everything first."""
-    path = Path(db_path())
-    if reset and path.exists():
-        path.unlink()
     with connect() as conn:
-        conn.executescript(SCHEMA)
+        if reset:
+            conn.execute("DROP SCHEMA public CASCADE")
+            conn.execute("CREATE SCHEMA public")
+        conn.execute(SCHEMA)
         if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
             _seed(conn)
 
@@ -76,21 +110,23 @@ _CAB_DAYS_AGO = [1, 2, 3, 5, 6, 7, 9, 10, 12, 13, 14, 16, 18, 20, 22, 24, 26, 28
 DEMO_RECEIPT_AMOUNT = 450
 
 
-def _seed(conn: sqlite3.Connection) -> None:
+def _seed(conn: psycopg.Connection) -> None:
     t = today()
     month = t.strftime("%Y-%m")
     conn.execute("INSERT INTO families VALUES ('f_sharma', 'Sharma Family')")
-    conn.executemany(
-        "INSERT INTO users VALUES (?,?,?,?)",
-        [("u_ravi", "Ravi", "admin", "f_sharma"),
-         ("u_priya", "Priya", "member", "f_sharma")],
-    )
+    pw = _demo_hash()
+    with conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO users (id, name, role, family_id, email, password_hash) VALUES (%s,%s,%s,%s,%s,%s)",
+            [("u_ravi", "Ravi", "admin", "f_sharma", "ravi@finmate.dev", pw),
+             ("u_priya", "Priya", "member", "f_sharma", "priya@finmate.dev", pw)],
+        )
 
     def add(user, days_ago, amount, merchant, category, note="", source="form"):
         d = (t - timedelta(days=days_ago)).isoformat()
         conn.execute(
             "INSERT INTO expenses (user_id, amount, date, merchant, category, source, note)"
-            " VALUES (?,?,?,?,?,?,?)",
+            " VALUES (%s,%s,%s,%s,%s,%s,%s)",
             (user, amount, d, merchant, category, source, note),
         )
 
@@ -112,19 +148,20 @@ def _seed(conn: sqlite3.Connection) -> None:
     # Set Ravi's Transport limit so that the ₹450 demo receipt lands at ~112%.
     mtd = conn.execute(
         "SELECT COALESCE(SUM(amount),0) FROM expenses"
-        " WHERE user_id='u_ravi' AND category='Transport' AND substr(date,1,7)=?",
+        " WHERE user_id='u_ravi' AND category='Transport' AND substr(date,1,7)=%s",
         (month,),
     ).fetchone()[0]
     target = round((mtd + DEMO_RECEIPT_AMOUNT) / 1.12 / 50) * 50
     # Late in the month mtd is large; never start above ~95% so the receipt still crosses 100%.
     transport_limit = max(300, target, -(-int(mtd / 0.95) // 50) * 50)
-    conn.executemany(
-        "INSERT INTO budgets VALUES (?,?,?,?)",
-        [("user", "u_ravi", "Transport", transport_limit),
-         ("user", "u_ravi", "Food", 4000),
-         ("user", "u_priya", "Shopping", 3000),
-         ("user", "u_priya", "Groceries", 9000),
-         ("family", "f_sharma", "Food", 12000),
-         ("family", "f_sharma", "Groceries", 12000),
-         ("family", "f_sharma", "Entertainment", 3000)],
-    )
+    with conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO budgets VALUES (%s,%s,%s,%s)",
+            [("user", "u_ravi", "Transport", transport_limit),
+             ("user", "u_ravi", "Food", 4000),
+             ("user", "u_priya", "Shopping", 3000),
+             ("user", "u_priya", "Groceries", 9000),
+             ("family", "f_sharma", "Food", 12000),
+             ("family", "f_sharma", "Groceries", 12000),
+             ("family", "f_sharma", "Entertainment", 3000)],
+        )
