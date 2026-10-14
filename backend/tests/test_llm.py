@@ -1,4 +1,6 @@
 """Provider switch (Gemini vs Ollama), per-agent model routing and the local OCR/voice paths. No network needed."""
+import json
+
 import pytest
 
 from finmate import db, llm, vision
@@ -75,13 +77,16 @@ def test_ollama_receipt_and_voice_paths(tmp_path, monkeypatch):
     vision.register_attachment("v1", "u_ravi")
     calls = []
 
-    def fake_chat(model, prompt, images=None):
+    def fake_chat(model, prompt, images=None, num_predict=None):
         calls.append((model, bool(images), "spent 450 on cab" in prompt))
+        if images:  # a photo is read as a whole bill with line items
+            return json.dumps({"merchant": "Uber", "date": "2026-10-08", "total": 450,
+                               "items": [{"name": "cab", "amount": 450, "category": "Transport"}]})
         return '{"amount": 450, "date": "2026-10-08", "merchant": "Uber", "category": "Transport", "note": "cab"}'
 
     monkeypatch.setattr(vision, "_ollama_chat", fake_chat)
     monkeypatch.setattr(vision, "_transcribe", lambda p: "spent 450 on cab")
-    r = vision.extract("r1", "receipt image", "u_ravi")["fields"]
+    r = vision.extract("r1", "receipt image", "u_ravi")["bill"]
     v = vision.extract("v1", "voice note", "u_ravi")["fields"]
     assert r["merchant"] == "Uber" and v["transcript"] == "spent 450 on cab"
     assert calls[0] == (llm.ollama_vision_tag(), True, False)        # photo goes to the vision model with the image

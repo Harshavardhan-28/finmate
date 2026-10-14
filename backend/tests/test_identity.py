@@ -74,7 +74,7 @@ def test_attachments_are_private_to_their_uploader(tmp_path, monkeypatch):
     db.init_db(reset=True)
     (tmp_path / "f00d.png").write_bytes(b"x")
     vision.register_attachment("f00d", "u_ravi")
-    assert vision.extract("f00d", "receipt image", "u_ravi")["fields"]["merchant"] == "Uber"
+    assert vision.extract("f00d", "receipt image", "u_ravi")["bill"]["merchant"] == "Uber"
     with pytest.raises(FileNotFoundError):
         vision.extract("f00d", "receipt image", "u_priya")
     with pytest.raises(FileNotFoundError):

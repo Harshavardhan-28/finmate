@@ -55,18 +55,33 @@ def test_full_receipt_flow_over_http(client):
     up = client.post("/api/upload", files={"file": ("r.png", b"\x89PNG fake")}, data={"kind": "receipt"}).json()
     ev = events(client.post("/api/chat", json={"attachment_id": up["attachment_id"],
                                                 "kind": "receipt", "message": "my cab receipt"}))
-    proposal = next(e for e in ev if e["type"] == "proposal")["proposal"]
-    assert proposal["merchant"] == "Uber" and proposal["amount"] == 450
+    bill = next(e for e in ev if e["type"] == "bill_proposal")["bill"]
+    assert bill["merchant"] == "Uber" and bill["total"] == 450 and bill["items"][0]["category"] == "Transport"
     assert any(e["type"] == "trace" and e.get("tool") == "ocr_receipt" for e in ev)
     assert ev[-1]["type"] == "done"
 
-    ev = events(client.post("/api/confirm", json={**{k: proposal[k] for k in
-                ("amount", "date", "merchant", "category", "source", "note")}}))
-    saved = next(e for e in ev if e["type"] == "saved")
+    # The user reviews the bill and adds an item before confirming; the server re-validates what comes back.
+    edited = {**bill, "items": bill["items"] + [{"name": "Tip", "amount": 50, "category": "Transport"}], "total": 500}
+    bad = client.post("/api/confirm_bill", json={**edited, "items": []})
+    assert bad.status_code == 422
+    ev = events(client.post("/api/confirm_bill", json=edited))
+    saved = next(e for e in ev if e["type"] == "bill_saved")
+    assert saved["bill"]["total"] == 500 and [i["note"] for i in saved["bill"]["items"]] == ["Home to Office", "Tip"]
+    assert all(i["bill_id"] == saved["bill"]["id"] for i in saved["bill"]["items"])
     assert any(a["level"] == "exceeded" for a in saved["alerts"])
     started = {e["agent"] for e in ev if e["type"] == "trace" and e["kind"] == "agent_start"}
     assert {"receipt_agent", "budget_agent", "insights_agent", "family_agent"} <= started
     assert next(e for e in ev if e["type"] == "final")["text"]
+    # The saved bill is readable, with its items, by its owner only.
+    got = client.get(f"/api/bills/{saved['bill']['id']}").json()
+    assert got["total"] == 500 and len(got["items"]) == 2 and got["attachment_id"] == up["attachment_id"]
+
+
+def test_typed_expense_still_uses_the_single_expense_path(client):
+    login(client)
+    ev = events(client.post("/api/confirm", json={"amount": 450, "date": "2026-10-08", "merchant": "Uber",
+                                                   "category": "Transport", "source": "form", "note": ""}))
+    assert any(e["type"] == "saved" for e in ev)
 
 
 def test_missing_key_gives_clear_error(client, monkeypatch):

@@ -12,12 +12,21 @@ export type Budget = { category: string; limit: number; spent: number; pct: numb
 export type Expense = {
   id: number; user_id: string; amount: number; date: string; merchant: string;
   category: string; source: string; note: string; bill_id: number | null;
+  quantity?: number | null; unit_price?: number | null;
 };
 export type Alert = { category: string; level: Level; pct: number; message: string; scope: string; created_at: string; user?: string };
 export type Proposal = {
   amount: number; date: string; merchant: string; category: string;
   source: string; note: string; unclear_fields: string[];
 };
+export type BillItem = { name: string; quantity: number | null; unit_price: number | null; amount: number; category: string };
+/** A whole bill read from a photo: header plus every line item, reviewed by the user before it is saved. */
+export type BillProposal = {
+  merchant: string; date: string; total: number; tax_fees: number; discount: number; bill_number: string;
+  payment_method: string; note: string; items: BillItem[]; unclear_fields: string[]; source: string;
+  attachment_id?: string | null; draft_id?: string;
+};
+export type BillRecord = { id: number; merchant: string; date: string; total: number; items: Expense[] };
 export type Member = { user_id: string; name: string; role: string; spent: number; budgets: Budget[] };
 export type FamilyView =
   | { error: "permission_denied"; message: string }
@@ -46,6 +55,8 @@ export type StreamEvent =
   | ({ type: "trace" } & Omit<TraceItem, "id" | "turn">)
   | { type: "proposal"; proposal: Proposal }
   | { type: "saved"; expense: Expense; alerts: Alert[] }
+  | { type: "bill_proposal"; bill: BillProposal }
+  | { type: "bill_saved"; bill: BillRecord; alerts: Alert[] }
   | { type: "final"; text: string }
   | { type: "error"; message: string }
   | { type: "done" };

@@ -28,9 +28,19 @@ against personal and family budgets, and warns you and suggests cheaper options 
   contain one. A runner-wide `ToolGuardPlugin` (`security.py`) refuses and logs any identity argument a model tries to
   pass, uploaded files are bound to their uploader, and role checks stay in `services.py`. Details in `tests/test_identity.py`,
   `tests/test_mcp_server.py` and the prompt-injection test in `tests/test_agents_e2e.py`.
-* **OCR / speech-to-text:** Gemini multimodal, called from MCP tools `ocr_receipt` and `transcribe_voice`.
-* **Human in the loop:** the Receipt Agent only *proposes* fields (`propose_expense`); nothing is saved until you press
-  *Confirm and save*. Budget changes are applied only after you approve them in chat.
+* **OCR / speech-to-text:** Gemini multimodal or local Ollama vision + Whisper, called from MCP tools `ocr_receipt` and
+  `transcribe_voice`.
+* **Bills with line items:** a receipt photo becomes one *bill* (merchant, date, total, bill number, payment method) with
+  every purchased item, each in its own category. Each item is saved as an expense linked to the bill (`expenses.bill_id`,
+  plus `quantity` / `unit_price`), so budgets, alerts and trends need no special handling; the receipt photo is linked to
+  the bill (`bills.attachment_id`). The model's output is validated by pydantic (`BillFields` in `schemas.py`) and
+  *reconciled* so the items always add up to the printed total: rounding is absorbed, taxes/fees become one explicit
+  line, a discount scales the lines, and a rate copied into the amount column is repaired when the total proves it.
+  The model never re-types items: `ocr_receipt` parks the bill in `bill_drafts` and returns a summary plus an id,
+  `propose_bill(draft_id)` shows it to you, your edited bill is re-validated by `POST /api/confirm_bill` and stored as a
+  *confirmed* draft, and `save_bill(confirmation_id)` saves exactly that. Drafts are private to their owner.
+* **Human in the loop:** the Receipt Agent only *proposes* (`propose_bill`, `propose_expense`); nothing is saved until you
+  press *Save* on the review screen. Budget changes are applied only after you approve them in chat.
 
 ## Run it
 

@@ -10,6 +10,7 @@ EXPECTED = {
     "save_expense", "get_budget_status", "set_budget", "get_alerts", "get_user_role",
     "get_family_view", "add_family_member", "get_expenses", "analyze_trends",
     "suggest_alternatives", "get_advice_history", "save_advice", "ocr_receipt", "transcribe_voice", "propose_expense",
+    "propose_bill", "save_bill",
 }
 HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
 
@@ -85,3 +86,26 @@ async def test_members_cannot_use_admin_tools(url):
     assert denied.get("error") == "permission_denied"
     ok = body(await call(url, "get_family_view", {}, "u_ravi"))
     assert "members" in ok
+
+
+@pytest.mark.anyio
+async def test_bill_drafts_cannot_be_read_or_saved_by_another_user(url, tmp_path, monkeypatch):
+    from finmate import vision
+    monkeypatch.setenv("FINMATE_FAKE_VISION", "1")
+    (tmp_path / "ra1.png").write_bytes(b"\x89PNG")
+    monkeypatch.setattr(vision, "UPLOADS", tmp_path)
+    vision.register_attachment("ra1", "u_ravi")
+    summary = body(await call(url, "ocr_receipt", {"attachment_id": "ra1"}, "u_ravi"))
+    assert summary["draft_id"] == "ra1" and summary["item_count"] == 1 and "items" not in summary   # the model never sees the items
+    # Priya cannot read Ravi's receipt, his draft, or use his confirmation.
+    stolen = await rpc(url, "tools/call", {"name": "ocr_receipt", "arguments": {"attachment_id": "ra1"}},
+                       token=identity.mint_tool_token("u_priya"))
+    assert stolen.json()["result"].get("isError")
+    assert body(await call(url, "propose_bill", {"draft_id": "ra1"}, "u_priya"))["error"] == "unknown_draft"
+    services.put_draft("u_ravi", "c-1", "confirmed", {"merchant": "Uber", "date": "2026-10-08", "total": 450,
+                                                      "items": [{"name": "x", "amount": 450, "category": "Transport"}]})
+    assert body(await call(url, "save_bill", {"confirmation_id": "c-1"}, "u_priya"))["error"] == "unknown_confirmation"
+    mine = body(await call(url, "propose_bill", {"draft_id": "ra1"}, "u_ravi"))
+    assert mine["bill_proposal"]["items"][0]["category"] == "Transport"
+    saved = body(await call(url, "save_bill", {"confirmation_id": "c-1"}, "u_ravi"))
+    assert saved["bill"]["total"] == 450 and len(saved["bill"]["items"]) == 1

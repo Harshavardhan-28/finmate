@@ -47,6 +47,8 @@ class BillItemIn(BaseModel):
     name: str = ""
     amount: float
     category: str
+    quantity: float | None = None
+    unit_price: float | None = None
 
 
 class BillIn(BaseModel):
@@ -70,6 +72,19 @@ def add_bill(body: BillIn, user: dict = Depends(auth.current_user)):
         raise HTTPException(422, "Every item needs an amount greater than zero")
     return services.save_bill(user["user_id"], body.merchant.strip(), body.date, [i.model_dump() for i in body.items],
                               body.note.strip())
+
+
+@router.get("/bills")
+def bills(days: int = 90, user: dict = Depends(auth.current_user)):
+    return services.list_bills(user["user_id"], max(1, min(days, 3650)))
+
+
+@router.get("/bills/{bill_id}")
+def bill(bill_id: int, user: dict = Depends(auth.current_user)):
+    found = services.get_bill(user["user_id"], bill_id)
+    if found is None:
+        raise HTTPException(404, "Bill not found")
+    return found
 
 
 @router.delete("/bills/{bill_id}")
