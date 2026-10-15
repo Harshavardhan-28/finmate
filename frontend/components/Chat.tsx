@@ -1,11 +1,13 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { Mic, Square } from "lucide-react";
 import Pick from "@/components/Pick";
 import { money } from "@/lib/format";
-import { CATEGORIES, type BillProposal, type Proposal } from "@/lib/types";
+import { useVoiceRecorder } from "@/lib/useVoiceRecorder";
+import { CATEGORIES, type BillProposal, type Proposal, type SttStatus } from "@/lib/types";
 
 export type Msg =
-  | { id: number; role: "user" | "assistant" | "error"; text: string; image?: string }
+  | { id: number; role: "user" | "assistant" | "error"; text: string; image?: string; voice?: boolean }
   | { id: number; role: "proposal"; proposal: Proposal; state: "pending" | "done" | "discarded" }
   | { id: number; role: "bill"; bill: BillProposal; state: "pending" | "done" | "discarded" };
 
@@ -165,6 +167,11 @@ export default function Chat(props: {
   busy: boolean;
   userName: string;
   onSend: (text: string) => void;
+  /** Called with a finished recording; the page turns it into text and sends it. */
+  onVoice: (audio: Blob) => void;
+  listening: boolean;
+  /** Speech-to-text engine status from /api/health, so the mic can say where audio goes. */
+  voice?: SttStatus;
   onConfirm: (id: number, p: Proposal) => void;
   onConfirmBill: (id: number, b: BillProposal) => void;
   onDiscard: (id: number) => void;
@@ -172,6 +179,9 @@ export default function Chat(props: {
   const { messages, busy } = props;
   const [text, setText] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
+  const { recording, error: micError, toggle: toggleMic } = useVoiceRecorder((wav) => props.onVoice(wav));
+  const micOff = !recording && (busy || props.listening || props.voice?.ready === false);
+  const micHint = props.voice?.ready === false ? props.voice.problem ?? "Voice input is not available" : "";
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" });
@@ -205,6 +215,7 @@ export default function Chat(props: {
             <div key={m.id} className={`msg ${m.role}`}>
               {/* eslint-disable-next-line @next/next/no-img-element */}
               {m.image && <img src={m.image} alt="Uploaded receipt" />}
+              {m.voice && <Mic size={12} className="spoken" aria-label="Spoken" />}
               <Rich text={m.text} />
             </div>
           ),
@@ -220,10 +231,23 @@ export default function Chat(props: {
 
       <div className="composer">
         <form className="composer-row" onSubmit={(e) => { e.preventDefault(); send(); }}>
-          <input type="text" value={text} onChange={(e) => setText(e.target.value)} disabled={busy}
-            placeholder="Message FinMate…" aria-label="Message" />
-          <button className="btn primary" type="submit" disabled={busy || !text.trim()}>Send</button>
+          <input type="text" value={text} onChange={(e) => setText(e.target.value)} disabled={busy || recording}
+            placeholder={recording ? "Listening…" : "Message FinMate or tap the mic…"} aria-label="Message" />
+          <button type="button" className={`mic ${recording ? "rec" : ""}`} onClick={() => void toggleMic()} disabled={micOff}
+            aria-pressed={recording} aria-label={recording ? "Stop recording" : "Speak to the assistant"}
+            title={micHint || (recording ? "Tap to stop and send" : "Speak to the assistant")}>
+            {recording ? <Square size={16} fill="currentColor" /> : <Mic size={18} />}
+          </button>
+          <button className="btn primary" type="submit" disabled={busy || recording || !text.trim()}>Send</button>
         </form>
+        <div className="voice-status" role="status" aria-live="polite">
+          {recording ? "Listening… tap the square when you are done."
+            : props.listening ? "Turning your voice into text…"
+            : micError ? <span className="err">{micError}</span>
+            : micHint ? <span className="err">{micHint}</span>
+            : props.voice?.cloud ? `Voice is transcribed by ${props.voice.provider === "groq" ? "Groq" : "a cloud service"}; the audio leaves this device.`
+            : ""}
+        </div>
       </div>
     </div>
   );

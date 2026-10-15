@@ -3,17 +3,17 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import { usePathname, useRouter } from "next/navigation";
 import type { Msg } from "@/components/Chat";
 import {
-  getDashboard, getExpenses, getHealth, getMe, logout as apiLogout, resetDemo, streamPost, upload,
+  getDashboard, getExpenses, getHealth, getMe, logout as apiLogout, resetDemo, speechToText, streamPost, upload,
 } from "@/lib/api";
 import { setCurrency } from "@/lib/format";
 import { toast } from "sonner";
 import { sampleReceipt } from "@/lib/sample";
-import type { AuthUser, BillProposal, Dashboard, Expense, Proposal, StreamEvent, TraceItem } from "@/lib/types";
+import type { AuthUser, BillProposal, Dashboard, Expense, Proposal, SttStatus, StreamEvent, TraceItem } from "@/lib/types";
 import { money } from "@/lib/format";
 
 type NewMsg = Msg extends infer M ? (M extends { id: number } ? Omit<M, "id"> : never) : never;
 type Lane = "chat" | "capture";
-type Health = { llm_configured: boolean; model: string };
+type Health = { llm_configured: boolean; model: string; stt?: SttStatus };
 
 type Ctx = {
   user: AuthUser;
@@ -28,7 +28,11 @@ type Ctx = {
   /** Typed conversation with the assistant. */
   chat: {
     messages: Msg[]; trace: TraceItem[]; busy: boolean;
-    send: (text: string) => void;
+    /** True while a spoken question is being turned into text. */
+    listening: boolean;
+    send: (text: string, voice?: boolean) => void;
+    /** Transcribe a recording and send the words to the assistant as a normal message. */
+    listen: (audio: Blob) => Promise<void>;
     confirm: (id: number, p: Proposal) => void;
     confirmBill: (id: number, b: BillProposal) => void;
     discard: (id: number) => void;
@@ -76,6 +80,7 @@ function Session({ user, setUser, children }: { user: AuthUser; setUser: (u: Aut
   const [lanes, setLanes] = useState<Record<Lane, Msg[]>>({ chat: [], capture: [] });
   const [trace, setTrace] = useState<TraceItem[]>([]);
   const [busy, setBusy] = useState(false);
+  const [listening, setListening] = useState(false);
   const [health, setHealth] = useState<Health | null>(null);
   const [offline, setOffline] = useState(false);
   const ids = useRef({ msg: 1, trace: 1, turn: 0 });
@@ -142,10 +147,22 @@ function Session({ user, setUser, children }: { user: AuthUser; setUser: (u: Aut
     }
   }
 
-  const send = (text: string) => {
-    add("chat", { role: "user", text });
+  const send = (text: string, voice = false) => {
+    add("chat", { role: "user", text, voice });
     void run("chat", "/api/chat", { message: text });
   };
+
+  async function listen(audio: Blob) {
+    setListening(true);
+    try {
+      const { text } = await speechToText(audio, "voice.wav");
+      send(text, true);
+    } catch (err) {
+      add("chat", { role: "error", text: err instanceof Error ? err.message : "Couldn't turn that recording into text." });
+    } finally {
+      setListening(false);
+    }
+  }
 
   const confirm = (id: number, p: Proposal) => {
     const lane = laneOf(id);
@@ -185,7 +202,7 @@ function Session({ user, setUser, children }: { user: AuthUser; setUser: (u: Aut
       await refresh();
     },
     chat: {
-      messages: lanes.chat, trace, busy, send, confirm, confirmBill,
+      messages: lanes.chat, trace, busy, listening, send, listen, confirm, confirmBill,
       discard: (id) => setProposalState(id, "discarded"),
     },
     capture: {

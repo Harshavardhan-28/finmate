@@ -1,5 +1,5 @@
 import type {
-  AuthUser, Dashboard, Expense, FamilyMember, SavedBill, SavedExpense, Status, StreamEvent,
+  AuthUser, Dashboard, Expense, FamilyMember, SavedBill, SavedExpense, Status, SttStatus, StreamEvent,
 } from "./types";
 
 export const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -12,9 +12,17 @@ async function json<T>(res: Response): Promise<T> {
   return res.json();
 }
 
+/** ngrok's free plan answers browser requests with an HTML warning page that has no CORS headers, so every fetch to an
+ *  ngrok address fails. This header makes ngrok pass the request through. It is only sent to ngrok addresses. */
+const NGROK_HEADERS: Record<string, string> = /ngrok/i.test(API) ? { "ngrok-skip-browser-warning": "1" } : {};
+
 /** Every call sends the httpOnly session cookie; a 401 means the session is gone. */
 const call = (path: string, init: RequestInit = {}) =>
-  fetch(`${API}${path}`, { credentials: "include", ...init });
+  fetch(`${API}${path}`, {
+    credentials: "include",
+    ...init,
+    headers: { ...NGROK_HEADERS, ...(init.headers as Record<string, string> | undefined) },
+  });
 const post = (path: string, body?: unknown) =>
   call(path, {
     method: "POST",
@@ -79,7 +87,7 @@ export const googleLoginUrl = `${API}/api/auth/google/login`;
 export const getExpenses = (days = 90) => call(`/api/expenses?days=${days}`).then(json<Expense[]>);
 export const getDashboard = () => call("/api/dashboard").then(json<Dashboard>);
 export const getHealth = () =>
-  call("/api/health").then(json<{ ok: boolean; llm_configured: boolean; model: string }>);
+  call("/api/health").then(json<{ ok: boolean; llm_configured: boolean; model: string; stt?: SttStatus }>);
 export const resetDemo = () => post("/api/reset").then(json);
 
 export async function upload(file: Blob, filename: string, kind: "receipt" | "voice") {
@@ -87,6 +95,14 @@ export async function upload(file: Blob, filename: string, kind: "receipt" | "vo
   form.append("file", file, filename);
   form.append("kind", kind);
   return call("/api/upload", { method: "POST", body: form }).then(json<{ attachment_id: string }>);
+}
+
+/** Turn a spoken recording into text. The server does not keep the audio. */
+export async function speechToText(audio: Blob, filename = "voice.wav", language = "") {
+  const form = new FormData();
+  form.append("file", audio, filename);
+  if (language) form.append("language", language);
+  return call("/api/stt", { method: "POST", body: form }).then(json<{ text: string; provider: string }>);
 }
 
 /** POST to an SSE endpoint and call onEvent for every `data:` frame as it arrives. */

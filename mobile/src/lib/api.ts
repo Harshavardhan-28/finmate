@@ -114,6 +114,27 @@ export function upload(uri: string, filename: string, mime: string, kind: "recei
   });
 }
 
+/** Speech-to-text for the assistant's mic. Same XMLHttpRequest route as `upload`; the server keeps no audio. */
+export function speechToText(uri: string, filename: string, mime: string) {
+  return new Promise<{ text: string; provider: string }>((resolve, reject) => {
+    const form = new FormData();
+    form.append("file", { uri, name: filename, type: mime } as unknown as Blob);
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${API}/api/stt`);
+    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    xhr.onload = () => {
+      let body: { text?: string; provider?: string; detail?: unknown } = {};
+      try { body = JSON.parse(xhr.responseText); } catch { /* non-JSON error body */ }
+      if (xhr.status >= 200 && xhr.status < 300 && typeof body.text === "string") resolve({ text: body.text, provider: body.provider ?? "" });
+      else reject(new Error(typeof body.detail === "string" ? body.detail : `Couldn’t transcribe that (${xhr.status})`));
+    };
+    xhr.onerror = () => reject(new Error("Couldn’t reach the server. Check the connection and try again."));
+    xhr.ontimeout = () => reject(new Error("Transcription timed out. Try a shorter message."));
+    xhr.timeout = 60000;
+    xhr.send(form);
+  });
+}
+
 /** POST to an SSE endpoint and call onEvent for every `data:` frame as it arrives. */
 export async function streamPost(path: string, body: unknown, onEvent: (e: StreamEvent) => void) {
   const res = await call(path, {

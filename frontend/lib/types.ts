@@ -40,6 +40,9 @@ export type Dashboard = {
   family: FamilyView;
 };
 
+/** What /api/health reports about speech-to-text: which engine, and whether audio leaves the machine. */
+export type SttStatus = { provider: "local" | "groq"; model: string; cloud: boolean; ready: boolean; problem: string | null };
+
 export type TraceItem = {
   id: number;
   turn: number;

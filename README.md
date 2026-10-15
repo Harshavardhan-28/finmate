@@ -28,6 +28,10 @@ against personal and family budgets, and warns you and suggests cheaper options 
   contain one. A runner-wide `ToolGuardPlugin` (`security.py`) refuses and logs any identity argument a model tries to
   pass, uploaded files are bound to their uploader, and role checks stay in `services.py`. Details in `tests/test_identity.py`,
   `tests/test_mcp_server.py` and the prompt-injection test in `tests/test_agents_e2e.py`.
+* **Voice input:** the Assistant has a mic button (web and mobile). Speech is transcribed by `POST /api/stt` and sent as a
+  normal message, so you can ask any agent by voice. `FINMATE_STT_PROVIDER=local` (default) runs `faster-whisper` on your
+  machine, so audio never leaves it; `groq` uses Groq's hosted Whisper (needs `GROQ_API_KEY`, audio goes to the cloud, and the UI
+  says so). Replies are text only. See `backend/finmate/stt.py`.
 * **OCR / speech-to-text:** Gemini multimodal or local Ollama vision + Whisper, called from MCP tools `ocr_receipt` and
   `transcribe_voice`.
 * **Bills with line items:** a receipt photo becomes one *bill* (merchant, date, total, bill number, payment method) with

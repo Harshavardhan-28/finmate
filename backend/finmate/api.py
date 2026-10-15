@@ -2,6 +2,8 @@
 import asyncio
 import json
 import os
+import re
+import tempfile
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,7 +21,7 @@ from google.adk.sessions import InMemorySessionService  # noqa: E402
 from google.genai import types  # noqa: E402
 from pydantic import BaseModel, ValidationError  # noqa: E402
 
-from . import account, agents, auth, db, ledger, llm, security, services, vision  # noqa: E402
+from . import account, agents, auth, db, ledger, llm, security, services, stt, vision  # noqa: E402
 from . import tool_launcher  # noqa: E402
 from .schemas import BillProposal  # noqa: E402
 from .trace import TracePlugin, current_queue  # noqa: E402
@@ -27,6 +29,8 @@ from .trace import TracePlugin, current_queue  # noqa: E402
 APP_NAME = "finmate"
 MAX_UPLOAD = 10 * 1024 * 1024
 ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".webp", ".wav", ".mp3", ".ogg", ".flac", ".aac", ".m4a"}
+STT_EXT = {".wav", ".mp3", ".ogg", ".flac", ".aac", ".m4a", ".webm"}  # audio only; browsers also record webm
+LANG_RE = re.compile(r"^[a-z]{2,3}$")
 
 
 class State:
@@ -209,7 +213,8 @@ async def confirm_bill(body: dict, user: dict = Depends(auth.current_user)):
 @app.get("/api/health")
 def health():
     s = llm.status()
-    return {"ok": True, "llm_configured": s["ready"], "model": s["model"], "provider": s["provider"], "problem": s["problem"]}
+    return {"ok": True, "llm_configured": s["ready"], "model": s["model"], "provider": s["provider"], "problem": s["problem"],
+            "stt": stt.status()}
 
 
 @app.get("/api/dashboard")
@@ -230,6 +235,35 @@ async def upload(file: UploadFile = File(...), kind: str = Form("receipt"),
     (vision.UPLOADS / f"{attachment_id}{ext}").write_bytes(data)
     vision.register_attachment(attachment_id, user["user_id"])
     return {"attachment_id": attachment_id, "kind": kind}
+
+
+@app.post("/api/stt")
+async def speech_to_text(file: UploadFile = File(...), language: str = Form(""),
+                         user: dict = Depends(auth.current_user)):
+    """Turn a spoken recording into text for the assistant's mic button. The audio is not kept."""
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in STT_EXT:
+        raise HTTPException(400, f"Unsupported audio type {ext or '(none)'}. Use wav, mp3, ogg, flac, aac, m4a or webm.")
+    language = language.strip().lower()
+    if language and not LANG_RE.match(language):
+        raise HTTPException(400, "language must be a short code such as 'en' or 'hi', or empty to auto-detect.")
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "The recording is empty.")
+    if len(data) > MAX_UPLOAD:
+        raise HTTPException(413, "Recording too large (max 10 MB).")
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+        tmp.write(data)
+    path = Path(tmp.name)
+    try:
+        text = await asyncio.to_thread(stt.transcribe, path, language or None)
+    except stt.SttError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    finally:
+        path.unlink(missing_ok=True)
+    if not text.strip():
+        raise HTTPException(422, "Couldn't hear any speech. Try again closer to the microphone.")
+    return {"text": text.strip(), "provider": stt.provider()}
 
 
 @app.post("/api/chat")

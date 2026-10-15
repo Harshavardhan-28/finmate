@@ -1,9 +1,11 @@
+import { AudioModule, RecordingPresets, setAudioModeAsync, useAudioRecorder, useAudioRecorderState } from "expo-audio";
 import { router } from "expo-router";
 import { useEffect, useRef, useState } from "react";
-import { KeyboardAvoidingView, Platform, Pressable, ScrollView, TextInput, View } from "react-native";
+import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Button, Icon, T } from "@/components/ui";
 import { F } from "@/components/ui";
+import * as api from "@/lib/api";
 import { money } from "@/lib/format";
 import { useSession } from "@/lib/session";
 import { useTheme } from "@/lib/theme";
@@ -35,9 +37,41 @@ export default function Assistant() {
   const { top, bottom } = useSafeAreaInsets();
   const { messages, busy, send, approve, discard } = useSession();
   const [text, setText] = useState("");
+  const [hearing, setHearing] = useState(false);
+  const [voiceError, setVoiceError] = useState("");
+  const rec = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const recState = useAudioRecorderState(rec);
   const ref = useRef<ScrollView>(null);
   useEffect(() => { setTimeout(() => ref.current?.scrollToEnd({ animated: true }), 60); }, [messages.length, busy]);
   const go = (t = text) => { if (t.trim() && !busy) { send(t.trim()); setText(""); } };
+
+  /** Tap to start, tap again to stop: the recording is turned into text and sent like a typed message. */
+  async function toggleMic() {
+    setVoiceError("");
+    if (recState.isRecording) {
+      await rec.stop();
+      const uri = rec.uri;
+      if (!uri) return;
+      setHearing(true);
+      try {
+        const { text: heard } = await api.speechToText(uri, "voice.m4a", "audio/m4a");
+        send(heard);
+      } catch (e) {
+        setVoiceError(e instanceof Error ? e.message : "Couldn’t turn that into text.");
+      } finally {
+        setHearing(false);
+      }
+      return;
+    }
+    const perm = await AudioModule.requestRecordingPermissionsAsync();
+    if (!perm.granted) return Alert.alert("Microphone is off", "Allow the microphone in Settings to talk to the assistant.");
+    await setAudioModeAsync({ playsInSilentMode: true, allowsRecording: true });
+    await rec.prepareToRecordAsync();
+    rec.record();
+  }
+  const micDisabled = !recState.isRecording && (busy || hearing);
+  const voiceNote = recState.isRecording ? "Listening… tap the check when you’re done"
+    : hearing ? "Turning your voice into text…" : voiceError;
 
   return (
     <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1, backgroundColor: c.bg, paddingTop: top }}>
@@ -80,9 +114,19 @@ export default function Assistant() {
           {PROMPTS.map((p) => <Pressable key={p} onPress={() => go(p)} style={{ minHeight: 44, paddingHorizontal: 16, borderRadius: 99, justifyContent: "center", backgroundColor: c.card, borderWidth: 1, borderColor: c.border }}><T w="bold" size={14}>{p}</T></Pressable>)}
         </ScrollView>
       ) : null}
+      {voiceNote ? (
+        <View accessibilityLiveRegion="polite" style={{ paddingHorizontal: 20, paddingTop: 8 }}>
+          <T w="bold" size={13} color={voiceError && !recState.isRecording && !hearing ? c.badInk : c.ink3}>{voiceNote}</T>
+        </View>
+      ) : null}
       <View style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 16, paddingTop: 8, paddingBottom: bottom + 10, borderTopWidth: 1, borderTopColor: c.line }}>
-        <TextInput value={text} onChangeText={setText} placeholder="Ask anything…" placeholderTextColor={c.ink3} onSubmitEditing={() => go()} returnKeyType="send" editable={!busy}
+        <TextInput value={text} onChangeText={setText} placeholder={recState.isRecording ? "Listening…" : "Ask anything…"} placeholderTextColor={c.ink3} onSubmitEditing={() => go()} returnKeyType="send" editable={!busy && !recState.isRecording}
           style={{ flex: 1, minHeight: 52, borderRadius: 26, borderWidth: 1, borderColor: c.border, backgroundColor: c.card, paddingHorizontal: 18, fontFamily: F.semi, fontSize: 16, color: c.ink }} />
+        <Pressable onPress={toggleMic} accessibilityRole="button" accessibilityLabel={recState.isRecording ? "Stop recording" : "Speak to the assistant"}
+          accessibilityState={{ disabled: micDisabled, selected: recState.isRecording }} disabled={micDisabled}
+          style={{ width: 52, height: 52, borderRadius: 26, borderWidth: 1, borderColor: recState.isRecording ? c.bad : c.border, backgroundColor: recState.isRecording ? c.bad : c.card, alignItems: "center", justifyContent: "center", opacity: micDisabled ? 0.5 : 1 }}>
+          <Icon name={recState.isRecording ? "check" : "mic"} color={recState.isRecording ? "#fff" : c.ink} />
+        </Pressable>
         <Pressable onPress={() => go()} accessibilityLabel="Send" disabled={busy || !text.trim()} style={{ width: 52, height: 52, borderRadius: 26, backgroundColor: c.lime, alignItems: "center", justifyContent: "center", opacity: busy || !text.trim() ? 0.5 : 1 }}>
           <Icon name="send" color="#121211" />
         </Pressable>

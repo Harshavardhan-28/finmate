@@ -12,7 +12,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from . import db, llm
+from . import db, llm, stt
 from .schemas import BillFields, ReceiptFields
 
 UPLOADS = Path(os.environ.get("FINMATE_UPLOADS", Path(__file__).resolve().parent.parent / "uploads"))
@@ -188,18 +188,9 @@ def _ollama_chat(model: str, prompt: str, images: list[str] | None = None, num_p
         return json.load(r)["message"]["content"]
 
 
-_whisper = None
-
-
 def _transcribe(path: Path) -> str:
-    """Local speech-to-text (faster-whisper, int8 on CPU). Handles Hindi/English; the model loads once."""
-    global _whisper
-    if _whisper is None:
-        from faster_whisper import WhisperModel
-
-        _whisper = WhisperModel(os.environ.get("FINMATE_WHISPER_MODEL", "small"), device="cpu", compute_type="int8")
-    segments, _info = _whisper.transcribe(str(path), beam_size=1, vad_filter=True)
-    return " ".join(s.text.strip() for s in segments).strip()
+    """Voice-note transcription for the local (Ollama) path: the shared local Whisper engine in stt.py."""
+    return stt.transcribe_local(path)
 
 
 def _ollama_extract(path: Path, kind: str) -> dict:
